@@ -11,6 +11,7 @@ import DateSeparator from './DateSeparator'
 import ImageUploadPreview from './ImageUploadPreview'
 import UnreadBadge from './UnreadBadge'
 import { getDateLabel, formatLastSeen } from '../utils/dates'
+import { linkify } from '../utils/linkify'
 
 const MAX_MESSAGE_LENGTH = 2000
 const TYPING_TIMEOUT = 3000
@@ -49,6 +50,9 @@ export default function ChatApp({ session }) {
   const [editText, setEditText] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const [activeMsgId, setActiveMsgId] = useState(null)
+  const [copiedToast, setCopiedToast] = useState(false)
+  const copyTimerRef = useRef(null)
+  const toastTimerRef = useRef(null)
   const [signedUrls, setSignedUrls] = useState({})
   const [lastSeenAt, setLastSeenAt] = useState(() =>
     localStorage.getItem('our-space-last-seen') || new Date(0).toISOString()
@@ -274,6 +278,7 @@ export default function ChatApp({ session }) {
     let cancelled = false
 
     const beat = () => {
+      if (document.visibilityState !== 'visible') return
       supabase
         .from('profiles')
         .update({ last_seen_at: new Date().toISOString() })
@@ -297,6 +302,13 @@ export default function ChatApp({ session }) {
     const poll = setInterval(refreshPartner, 20000)
     const onFocus = () => refreshPartner()
     window.addEventListener('focus', onFocus)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        beat()
+        refreshPartner()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
     const tick = setInterval(() => setPresenceNow(Date.now()), 30000)
 
     return () => {
@@ -305,6 +317,7 @@ export default function ChatApp({ session }) {
       clearInterval(poll)
       clearInterval(tick)
       window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [user.id])
 
@@ -571,6 +584,41 @@ export default function ChatApp({ session }) {
     setConfirmDeleteId(null)
   }
 
+  // ---------- Copy on long-press / right-click ----------
+  const suppressClickRef = useRef(false)
+
+  const showToast = () => {
+    setCopiedToast(true)
+    clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setCopiedToast(false), 1200)
+  }
+
+  const copyMessage = (msg) => {
+    if (!msg.content) return
+    navigator.clipboard.writeText(msg.content).then(showToast)
+  }
+
+  const handleBubbleTouchStart = (msg) => {
+    clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => {
+      suppressClickRef.current = true
+      copyMessage(msg)
+    }, 500)
+  }
+
+  const cancelBubbleTouch = () => {
+    clearTimeout(copyTimerRef.current)
+  }
+
+  const handleBubbleClick = (msgId, e) => {
+    e.stopPropagation()
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    setActiveMsgId((prev) => (prev === msgId ? null : msgId))
+  }
+
   // ---------- Format timestamp ----------
   const formatTime = (iso) => {
     const d = new Date(iso)
@@ -741,7 +789,11 @@ export default function ChatApp({ session }) {
                         />
 
                         <div
-                          onClick={(e) => { e.stopPropagation(); setActiveMsgId((prev) => (prev === msg.id ? null : msg.id)) }}
+                          onClick={(e) => handleBubbleClick(msg.id, e)}
+                          onTouchStart={() => handleBubbleTouchStart(msg)}
+                          onTouchEnd={cancelBubbleTouch}
+                          onTouchMove={cancelBubbleTouch}
+                          onContextMenu={(e) => { e.preventDefault(); copyMessage(msg) }}
                           className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-snug shadow-md backdrop-blur-md cursor-pointer select-none ${
                             isOutgoing
                               ? 'bg-[#007aff] text-white rounded-br-xs'
@@ -838,7 +890,24 @@ export default function ChatApp({ session }) {
                             </div>
                           ) : (
                             msg.content && (
-                              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{msg.content}</p>
+                              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                                {linkify(msg.content).map((part, i) =>
+                                  part.type === 'link' ? (
+                                    <a
+                                      key={i}
+                                      href={part.value}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="underline underline-offset-2 text-blue-300 hover:text-blue-200"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      {part.value}
+                                    </a>
+                                  ) : (
+                                    <span key={i}>{part.value}</span>
+                                  )
+                                )}
+                              </p>
                             )
                           )}
 
@@ -995,6 +1064,13 @@ export default function ChatApp({ session }) {
       />
 
       <PhotoViewer url={viewingPhoto} onClose={() => setViewingPhoto(null)} />
+
+      {/* Copied toast */}
+      {copiedToast && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-1.5 rounded-full bg-white/15 backdrop-blur-md border border-white/20 text-white/90 text-xs font-medium shadow-lg toast-in select-none pointer-events-none">
+          Copied
+        </div>
+      )}
     </div>
   )
 }

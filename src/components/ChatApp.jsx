@@ -6,6 +6,7 @@ import ScrollToBottom from './ScrollToBottom'
 import WallpaperPicker from './WallpaperPicker'
 import ProfileEdit from './ProfileEdit'
 import PhotoViewer from './PhotoViewer'
+import PhotoGallery from './PhotoGallery'
 import ReactionPicker from './ReactionPicker'
 import DateSeparator from './DateSeparator'
 import ImageUploadPreview from './ImageUploadPreview'
@@ -37,6 +38,8 @@ export default function ChatApp({ session }) {
   const [partnerAvatar, setPartnerAvatar] = useState(DEFAULT_AVATAR)
   const [partnerLastSeen, setPartnerLastSeen] = useState(null)
   const [presenceNow, setPresenceNow] = useState(() => Date.now())
+  const [pinnedMessageId, setPinnedMessageId] = useState(null)
+  const [showGallery, setShowGallery] = useState(false)
   const [myName, setMyName] = useState('')
   const [myAvatar, setMyAvatar] = useState(DEFAULT_AVATAR)
   const [showProfileModal, setShowProfileModal] = useState(false)
@@ -66,13 +69,18 @@ export default function ChatApp({ session }) {
   const typingChannelRef = useRef(null)
   const fileInputRef = useRef(null)
   const partnerUserIdRef = useRef(null)
+  const wallpaperRef = useRef(selectedWallpaper)
 
   // Persist wallpaper + crossfade
   const setSelectedWallpaper = (url) => {
     setPrevWallpaper(selectedWallpaper)
     setSelectedWallpaperState(url)
+    wallpaperRef.current = url
     localStorage.setItem('our-space-wallpaper', url)
     setTimeout(() => setPrevWallpaper(null), 600)
+    if (roomId) {
+      supabase.from('rooms').update({ wallpaper_url: url }).eq('id', roomId).then(() => {})
+    }
   }
 
   // Auto-resize textarea
@@ -106,6 +114,22 @@ export default function ChatApp({ session }) {
       const rid = memberRows[0].room_id
       if (cancelled) return
       setRoomId(rid)
+
+      // Load room-level state (pinned message + shared wallpaper)
+      const { data: roomRow } = await supabase
+        .from('rooms')
+        .select('pinned_message_id, wallpaper_url')
+        .eq('id', rid)
+        .single()
+
+      if (!cancelled && roomRow) {
+        setPinnedMessageId(roomRow.pinned_message_id || null)
+        if (roomRow.wallpaper_url) {
+          setSelectedWallpaperState(roomRow.wallpaper_url)
+          wallpaperRef.current = roomRow.wallpaper_url
+          localStorage.setItem('our-space-wallpaper', roomRow.wallpaper_url)
+        }
+      }
 
       // Find the other member and load both profiles
       const { data: allMembers } = await supabase
@@ -182,6 +206,23 @@ export default function ChatApp({ session }) {
           setMessages((prev) =>
             prev.map((m) => (m.id === payload.new.id ? { ...m, ...payload.new } : m))
           )
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
+        (payload) => {
+          setPinnedMessageId(payload.new.pinned_message_id || null)
+          if (
+            payload.new.wallpaper_url &&
+            payload.new.wallpaper_url !== wallpaperRef.current
+          ) {
+            setPrevWallpaper(wallpaperRef.current)
+            setSelectedWallpaperState(payload.new.wallpaper_url)
+            wallpaperRef.current = payload.new.wallpaper_url
+            localStorage.setItem('our-space-wallpaper', payload.new.wallpaper_url)
+            setTimeout(() => setPrevWallpaper(null), 600)
+          }
         }
       )
       .subscribe()
@@ -272,6 +313,11 @@ export default function ChatApp({ session }) {
   const unreadCount = messages.filter(
     (m) => m.sender_id !== user.id && m.created_at > lastSeenAt
   ).length
+
+  const galleryPhotos = messages
+    .filter((m) => m.message_type === 'photo' && signedUrls[m.id])
+    .map((m) => ({ id: m.id, url: signedUrls[m.id] }))
+    .reverse()
 
   // ---------- Presence: heartbeat + partner last-seen ----------
   useEffect(() => {
@@ -584,8 +630,17 @@ export default function ChatApp({ session }) {
     setConfirmDeleteId(null)
   }
 
-  // ---------- Copy on long-press / right-click ----------
+  // ---------- Pin / unpin ----------
+  const togglePin = async (msgId) => {
+    if (!roomId) return
+    const next = pinnedMessageId === msgId ? null : msgId
+    setPinnedMessageId(next)
+    supabase.from('rooms').update({ pinned_message_id: next }).eq('id', roomId).then(() => {})
+  }
+
+  // ---------- Copy on long-press / right-click + swipe-to-reply ----------
   const suppressClickRef = useRef(false)
+  const swipeRef = useRef(null)
 
   const showToast = () => {
     setCopiedToast(true)
@@ -598,7 +653,9 @@ export default function ChatApp({ session }) {
     navigator.clipboard.writeText(msg.content).then(showToast)
   }
 
-  const handleBubbleTouchStart = (msg) => {
+  const handleBubbleTouchStart = (msg, e) => {
+    const t = e.touches[0]
+    swipeRef.current = { msg, startX: t.clientX, startY: t.clientY, decided: false, swiping: false, offset: 0 }
     clearTimeout(copyTimerRef.current)
     copyTimerRef.current = setTimeout(() => {
       suppressClickRef.current = true
@@ -606,8 +663,42 @@ export default function ChatApp({ session }) {
     }, 500)
   }
 
-  const cancelBubbleTouch = () => {
+  const handleBubbleTouchMove = (e) => {
+    const s = swipeRef.current
+    if (!s) return
+    const t = e.touches[0]
+    const dx = t.clientX - s.startX
+    const dy = t.clientY - s.startY
+    if (!s.decided) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return
+      s.decided = true
+      s.swiping = dx > 0 && Math.abs(dx) > Math.abs(dy)
+      clearTimeout(copyTimerRef.current)
+    }
+    if (!s.swiping) return
+    const bubbleCol = e.currentTarget.parentElement
+    const offset = Math.min(Math.max(dx, 0), 80)
+    s.offset = offset
+    bubbleCol.style.transition = 'none'
+    bubbleCol.style.transform = `translateX(${offset}px)`
+    const arrow = bubbleCol.querySelector('.swipe-reply-arrow')
+    if (arrow) arrow.style.opacity = String(Math.min(offset / 48, 1))
+  }
+
+  const handleBubbleTouchEnd = (e) => {
     clearTimeout(copyTimerRef.current)
+    const s = swipeRef.current
+    swipeRef.current = null
+    if (!s?.swiping) return
+    const bubbleCol = e.currentTarget.parentElement
+    bubbleCol.style.transition = 'transform 0.2s ease'
+    bubbleCol.style.transform = 'translateX(0)'
+    const arrow = bubbleCol.querySelector('.swipe-reply-arrow')
+    if (arrow) arrow.style.opacity = '0'
+    if (s.offset >= 48) {
+      suppressClickRef.current = true
+      setReplyingTo(s.msg)
+    }
   }
 
   const handleBubbleClick = (msgId, e) => {
@@ -708,6 +799,15 @@ export default function ChatApp({ session }) {
               </svg>
             </button>
             <button
+              onClick={() => setShowGallery(true)}
+              title="Shared photos"
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white/90 transition-all border border-white/10 cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+              </svg>
+            </button>
+            <button
               onClick={handleSignOut}
               title="Sign out"
               className="text-[10px] px-2 py-1 rounded-md font-medium border bg-white/15 border-white/20 text-white hover:bg-white/25 transition-all cursor-pointer"
@@ -716,6 +816,43 @@ export default function ChatApp({ session }) {
             </button>
           </div>
         </header>
+
+        {/* Pinned message bar */}
+        {(() => {
+          const pinned = messages.find((m) => m.id === pinnedMessageId)
+          if (!pinned) return null
+          const sender = pinned.sender_id === user.id ? 'You' : (partnerName || 'Friend')
+          return (
+            <div className="relative z-20 px-4 py-2 bg-black/50 backdrop-blur-md border-b border-white/10 flex items-center gap-3 shrink-0">
+              <span className="text-amber-300 shrink-0">
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                </svg>
+              </span>
+              <button
+                onClick={() => {
+                  const el = document.getElementById(`msg-${pinned.id}`)
+                  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                }}
+                className="flex-1 min-w-0 text-left cursor-pointer"
+              >
+                <p className="text-[11px] text-amber-300/90 font-medium">Pinned · {sender}</p>
+                <p className="text-xs text-white/60 truncate">
+                  {pinned.message_type === 'photo' ? '📷 Photo' : pinned.content || '...'}
+                </p>
+              </button>
+              <button
+                onClick={() => togglePin(pinned.id)}
+                aria-label="Unpin"
+                className="text-white/40 hover:text-white p-1 rounded-full hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )
+        })()}
 
         {/* Messages */}
         <main
@@ -760,7 +897,7 @@ export default function ChatApp({ session }) {
               }
 
               return (
-                <div key={msg.id}>
+                <div key={msg.id} id={`msg-${msg.id}`}>
                   {showDate && <DateSeparator label={getDateLabel(msg.created_at)} />}
 
                   <div
@@ -776,6 +913,13 @@ export default function ChatApp({ session }) {
                       )}
 
                       <div className="relative max-w-full">
+                        {/* Swipe-to-reply arrow */}
+                        <span className="swipe-reply-arrow absolute -left-8 top-1/2 -translate-y-1/2 text-white/70 opacity-0 pointer-events-none select-none">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a5 5 0 015 5v2m0 0l-3-3m3 3l3-3" />
+                          </svg>
+                        </span>
+
                         {/* Reaction picker on hover */}
                         <ReactionPicker
                           myReaction={myReaction}
@@ -784,15 +928,17 @@ export default function ChatApp({ session }) {
                           onReply={() => { setReplyingTo(msg); setActiveMsgId(null) }}
                           onEdit={() => { startEdit(msg); setActiveMsgId(null) }}
                           onDelete={() => { setConfirmDeleteId(msg.id); setActiveMsgId(null) }}
+                          onPin={() => { togglePin(msg.id); setActiveMsgId(null) }}
+                          isPinned={pinnedMessageId === msg.id}
                           isOwn={isOutgoing}
                           side={isOutgoing ? 'right' : 'left'}
                         />
 
                         <div
                           onClick={(e) => handleBubbleClick(msg.id, e)}
-                          onTouchStart={() => handleBubbleTouchStart(msg)}
-                          onTouchEnd={cancelBubbleTouch}
-                          onTouchMove={cancelBubbleTouch}
+                          onTouchStart={(e) => handleBubbleTouchStart(msg, e)}
+                          onTouchMove={handleBubbleTouchMove}
+                          onTouchEnd={handleBubbleTouchEnd}
                           onContextMenu={(e) => { e.preventDefault(); copyMessage(msg) }}
                           className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-snug shadow-md backdrop-blur-md cursor-pointer select-none ${
                             isOutgoing
@@ -1064,6 +1210,12 @@ export default function ChatApp({ session }) {
       />
 
       <PhotoViewer url={viewingPhoto} onClose={() => setViewingPhoto(null)} />
+
+      <PhotoGallery
+        photos={galleryPhotos}
+        onOpen={(url) => { setShowGallery(false); setViewingPhoto(url) }}
+        onClose={showGallery ? () => setShowGallery(false) : null}
+      />
 
       {/* Copied toast */}
       {copiedToast && (

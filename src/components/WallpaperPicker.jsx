@@ -5,7 +5,10 @@ export default function WallpaperPicker({ wallpapers, selected, onSelect, onClos
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
       <div className="bg-[#1c1c1e] border border-white/15 rounded-2xl w-full max-w-sm p-5 shadow-2xl text-white">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold">Choose Chat Wallpaper</h2>
+          <div>
+            <h2 className="text-base font-semibold">Chat Wallpaper</h2>
+            <p className="text-[11px] text-white/50">Shared with both of you</p>
+          </div>
           <button onClick={onClose} className="text-white/60 hover:text-white p-1 rounded-lg cursor-pointer">
             ✕
           </button>

@@ -1,6 +1,6 @@
 const EMOJIS = ['❤️', '👍', '🔥']
 
-export default function ReactionPicker({ myReaction, onReact, onReply, onEdit, onDelete, isOwn, side, open }) {
+export default function ReactionPicker({ myReaction, onReact, onReply, onEdit, onDelete, onPin, isOwn, isPinned, side, open }) {
   return (
     <div
       onClick={(e) => e.stopPropagation()}
@@ -30,6 +30,17 @@ export default function ReactionPicker({ myReaction, onReact, onReply, onEdit, o
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a5 5 0 015 5v2m0 0l-3-3m3 3l3-3" />
+        </svg>
+      </button>
+      <button
+        onClick={onPin}
+        className={`w-7 h-7 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+          isPinned ? 'text-amber-300 bg-amber-400/15' : 'text-white/70 hover:bg-white/10 hover:text-white'
+        }`}
+        title={isPinned ? 'Unpin' : 'Pin'}
+      >
+        <svg className="w-3.5 h-3.5" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
         </svg>
       </button>
       {isOwn && (

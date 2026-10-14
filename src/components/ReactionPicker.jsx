@@ -1,9 +1,14 @@
 const EMOJIS = ['❤️', '👍', '🔥']
 
-export default function ReactionPicker({ myReaction, onReact, onReply, onEdit, onDelete, isOwn, side }) {
+export default function ReactionPicker({ myReaction, onReact, onReply, onEdit, onDelete, isOwn, side, open }) {
   return (
     <div
-      className={`absolute -top-8 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#1c1c1e] border border-white/20 px-1.5 py-1 rounded-full z-20 shadow-lg ${side === 'right' ? 'right-0' : 'left-0'}`}
+      onClick={(e) => e.stopPropagation()}
+      className={`absolute -top-8 transition-opacity flex items-center gap-0.5 bg-[#1c1c1e] border border-white/20 px-1.5 py-1 rounded-full z-20 shadow-lg ${
+        open
+          ? 'opacity-100 pointer-events-auto'
+          : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'
+      } ${side === 'right' ? 'right-0' : 'left-0'}`}
     >
       {EMOJIS.map((emoji) => (
         <button

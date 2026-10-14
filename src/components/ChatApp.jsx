@@ -46,6 +46,7 @@ export default function ChatApp({ session }) {
   const [editingMsg, setEditingMsg] = useState(null)
   const [editText, setEditText] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+  const [activeMsgId, setActiveMsgId] = useState(null)
   const [signedUrls, setSignedUrls] = useState({})
   const [lastSeenAt, setLastSeenAt] = useState(() =>
     localStorage.getItem('our-space-last-seen') || new Date(0).toISOString()
@@ -294,13 +295,14 @@ export default function ChatApp({ session }) {
     })
   }
 
-  // Cancel reply/edit/delete on Escape
+  // Cancel reply/edit/delete/picker on Escape
   useEffect(() => {
     const handleKey = (e) => {
       if (e.key === 'Escape') {
         if (replyingTo) setReplyingTo(null)
         if (editingMsg) cancelEdit()
         if (confirmDeleteId) setConfirmDeleteId(null)
+        setActiveMsgId(null)
       }
     }
     window.addEventListener('keydown', handleKey)
@@ -602,6 +604,7 @@ export default function ChatApp({ session }) {
         {/* Messages */}
         <main
           ref={mainRef}
+          onClick={() => setActiveMsgId(null)}
           onScroll={handleScroll}
           className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden px-4 pt-8 pb-6 space-y-5 focus:outline-none chat-scrollbar"
           tabIndex={0}
@@ -660,16 +663,18 @@ export default function ChatApp({ session }) {
                         {/* Reaction picker on hover */}
                         <ReactionPicker
                           myReaction={myReaction}
-                          onReact={(emoji) => addReaction(msg.id, emoji)}
-                          onReply={() => setReplyingTo(msg)}
-                          onEdit={() => startEdit(msg)}
-                          onDelete={() => setConfirmDeleteId(msg.id)}
+                          open={activeMsgId === msg.id}
+                          onReact={(emoji) => { addReaction(msg.id, emoji); setActiveMsgId(null) }}
+                          onReply={() => { setReplyingTo(msg); setActiveMsgId(null) }}
+                          onEdit={() => { startEdit(msg); setActiveMsgId(null) }}
+                          onDelete={() => { setConfirmDeleteId(msg.id); setActiveMsgId(null) }}
                           isOwn={isOutgoing}
                           side={isOutgoing ? 'right' : 'left'}
                         />
 
                         <div
-                          className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-snug shadow-md backdrop-blur-md ${
+                          onClick={(e) => { e.stopPropagation(); setActiveMsgId((prev) => (prev === msg.id ? null : msg.id)) }}
+                          className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-snug shadow-md backdrop-blur-md cursor-pointer select-none ${
                             isOutgoing
                               ? 'bg-[#007aff] text-white rounded-br-xs'
                               : 'bg-[#262629]/90 text-white rounded-bl-xs border border-white/10'
@@ -696,7 +701,7 @@ export default function ChatApp({ session }) {
                           {isPhoto && (
                             <div
                               className="mb-1.5 -mx-1 -mt-1 overflow-hidden rounded-xl cursor-pointer"
-                              onClick={() => setViewingPhoto(photoUrl)}
+                              onClick={(e) => { e.stopPropagation(); setViewingPhoto(photoUrl) }}
                             >
                               <img
                                 src={photoUrl}
@@ -708,7 +713,7 @@ export default function ChatApp({ session }) {
 
                           {/* Delete confirmation */}
                           {showDeleteConfirm && (
-                            <div className="mb-2 p-2.5 rounded-xl bg-red-500/15 border border-red-500/25 text-xs">
+                            <div onClick={(e) => e.stopPropagation()} className="mb-2 p-2.5 rounded-xl bg-red-500/15 border border-red-500/25 text-xs">
                               <p className="text-red-200 mb-2">Delete this message?</p>
                               <div className="flex gap-2">
                                 <button
@@ -729,7 +734,7 @@ export default function ChatApp({ session }) {
 
                           {/* Edit mode */}
                           {isEditing ? (
-                            <div>
+                            <div onClick={(e) => e.stopPropagation()}>
                               <textarea
                                 value={editText}
                                 onChange={(e) => setEditText(e.target.value)}

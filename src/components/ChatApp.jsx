@@ -10,7 +10,7 @@ import ReactionPicker from './ReactionPicker'
 import DateSeparator from './DateSeparator'
 import ImageUploadPreview from './ImageUploadPreview'
 import UnreadBadge from './UnreadBadge'
-import { getDateLabel } from '../utils/dates'
+import { getDateLabel, formatLastSeen } from '../utils/dates'
 
 const MAX_MESSAGE_LENGTH = 2000
 const TYPING_TIMEOUT = 3000
@@ -34,6 +34,8 @@ export default function ChatApp({ session }) {
   const [roomId, setRoomId] = useState(null)
   const [partnerName, setPartnerName] = useState('')
   const [partnerAvatar, setPartnerAvatar] = useState(DEFAULT_AVATAR)
+  const [partnerLastSeen, setPartnerLastSeen] = useState(null)
+  const [presenceNow, setPresenceNow] = useState(() => Date.now())
   const [myName, setMyName] = useState('')
   const [myAvatar, setMyAvatar] = useState(DEFAULT_AVATAR)
   const [showProfileModal, setShowProfileModal] = useState(false)
@@ -59,6 +61,7 @@ export default function ChatApp({ session }) {
   const lastTypingSentRef = useRef(0)
   const typingChannelRef = useRef(null)
   const fileInputRef = useRef(null)
+  const partnerUserIdRef = useRef(null)
 
   // Persist wallpaper + crossfade
   const setSelectedWallpaper = (url) => {
@@ -111,7 +114,7 @@ export default function ChatApp({ session }) {
         if (other) {
           const { data: profiles } = await supabase
             .from('profiles')
-            .select('user_id, display_name, avatar_url')
+            .select('user_id, display_name, avatar_url, last_seen_at')
             .in('user_id', [user.id, other.user_id])
 
           if (!cancelled && profiles) {
@@ -124,6 +127,8 @@ export default function ChatApp({ session }) {
             if (theirs) {
               setPartnerName(theirs.display_name || 'Friend')
               setPartnerAvatar(theirs.avatar_url || DEFAULT_AVATAR)
+              setPartnerLastSeen(theirs.last_seen_at)
+              partnerUserIdRef.current = theirs.user_id
             }
           }
         }
@@ -157,6 +162,9 @@ export default function ChatApp({ session }) {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${roomId}` },
         (payload) => {
+          if (payload.new.sender_id !== user.id) {
+            setPartnerLastSeen(payload.new.created_at)
+          }
           setMessages((prev) => {
             if (prev.some((m) => m.id === payload.new.id)) return prev
             return [...prev, payload.new]
@@ -177,7 +185,7 @@ export default function ChatApp({ session }) {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [roomId])
+  }, [roomId, user.id])
 
   // ---------- Signed URLs for photos ----------
   useEffect(() => {
@@ -261,6 +269,45 @@ export default function ChatApp({ session }) {
     (m) => m.sender_id !== user.id && m.created_at > lastSeenAt
   ).length
 
+  // ---------- Presence: heartbeat + partner last-seen ----------
+  useEffect(() => {
+    let cancelled = false
+
+    const beat = () => {
+      supabase
+        .from('profiles')
+        .update({ last_seen_at: new Date().toISOString() })
+        .eq('user_id', user.id)
+        .then(() => {})
+    }
+    beat()
+    const beatTimer = setInterval(beat, 30000)
+
+    const refreshPartner = async () => {
+      const pid = partnerUserIdRef.current
+      if (!pid) return
+      const { data } = await supabase
+        .from('profiles')
+        .select('last_seen_at')
+        .eq('user_id', pid)
+        .single()
+      if (!cancelled && data) setPartnerLastSeen(data.last_seen_at)
+    }
+
+    const poll = setInterval(refreshPartner, 20000)
+    const onFocus = () => refreshPartner()
+    window.addEventListener('focus', onFocus)
+    const tick = setInterval(() => setPresenceNow(Date.now()), 30000)
+
+    return () => {
+      cancelled = true
+      clearInterval(beatTimer)
+      clearInterval(poll)
+      clearInterval(tick)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [user.id])
+
   // ---------- Typing indicator (Realtime Broadcast) ----------
   useEffect(() => {
     if (!roomId) return
@@ -300,7 +347,10 @@ export default function ChatApp({ session }) {
     const handleKey = (e) => {
       if (e.key === 'Escape') {
         if (replyingTo) setReplyingTo(null)
-        if (editingMsg) cancelEdit()
+        if (editingMsg) {
+          setEditingMsg(null)
+          setEditText('')
+        }
         if (confirmDeleteId) setConfirmDeleteId(null)
         setActiveMsgId(null)
       }
@@ -559,8 +609,26 @@ export default function ChatApp({ session }) {
               alt={partnerName}
               className="w-9 h-9 rounded-full object-cover ring-1 ring-white/20"
             />
-            <h1 className="text-sm font-semibold tracking-tight text-white">{partnerName || 'Friend'}</h1>
-            <UnreadBadge count={unreadCount} onClick={clearUnread} />
+            <div className="flex flex-col">
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-sm font-semibold tracking-tight text-white">{partnerName || 'Friend'}</h1>
+                <UnreadBadge count={unreadCount} onClick={clearUnread} />
+              </div>
+              <span className="flex items-center gap-1 text-[11px] text-white/50">
+                {(() => {
+                  const status = formatLastSeen(partnerLastSeen, presenceNow)
+                  const isOnline = status === 'Active now'
+                  return (
+                    <>
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${isOnline ? 'bg-green-400' : 'bg-white/30'}`}
+                      />
+                      {status}
+                    </>
+                  )
+                })()}
+              </span>
+            </div>
           </div>
 
           <div className="flex items-center gap-1.5">

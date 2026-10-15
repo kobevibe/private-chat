@@ -1,143 +1,149 @@
 # Supabase Setup Guide — Our Space
 
-Follow every step in order. Do not skip the RLS or migration steps.
+Current state of the database and how to recreate it from scratch.
 
 ---
 
-## Step 1 — Create the two accounts
+## What exists
 
-1. Go to **Supabase Dashboard → Authentication → Users**.
-2. Click **"Add user"** (or **"Create user"**).
-3. Create the first user:
-   - Email: `ramzhw@yourdomain.com` (use your real email or any valid address)
-   - Password: choose a strong password (you will need it to log in)
-   - **Auto Confirm User**: toggle ON
-4. Create the second user the same way for `blackkity5588`.
-5. After both are created, copy each user's **UUID** from the users list (it looks like `a1b2c3d4-...`). You will need them in Step 4.
+| Table | Purpose |
+|---|---|
+| `rooms` | One shared room. Holds `pinned_message_id` and `wallpaper_url` (shared between both accounts) |
+| `room_members` | Two members per room (trigger-enforced max 2) |
+| `messages` | Text + photo messages, reactions, replies, edits, read receipts, pins |
+| `profiles` | Display name, avatar URL, `last_seen_at` (presence) |
+| Storage bucket `chat-photos` | Private bucket for uploaded images, served via signed URLs |
+
+### `messages` columns
+
+`id`, `room_id`, `sender_id`, `content`, `message_type` (`text` | `photo`), `media_url` (storage path for photos), `media_metadata`, `read_at`, `created_at`, plus:
+
+- `reply_to uuid` — quoted parent message
+- `reactions jsonb` — `{ user_id: emoji }` map
+- `edited_at timestamptz` — set when sender edits
+- `pinned_at` — (pin lives on `rooms.pinned_message_id`, not per-message)
+
+### `profiles` columns
+
+`user_id`, `display_name`, `avatar_url`, `updated_at`, `last_seen_at`
+
+### `rooms` columns
+
+`id`, `created_at`, `pinned_message_id` (FK → messages, `on delete set null`), `wallpaper_url`
 
 ---
 
-## Step 2 — Run the SQL migration
+## Recreating from scratch
 
-1. In the Supabase Dashboard, open **SQL Editor**.
-2. Click **"New query"**.
-3. Paste the entire contents of `supabase/migrations/0001_initial_schema.sql`.
-4. Click **"Run"**.
-5. You should see `Success. No rows returned`.
+### 1. Create the two accounts
 
-This creates three tables (`rooms`, `room_members`, `messages`), enables Row Level Security on all of them, and adds the helper functions and triggers.
+**Authentication → Users → Add user**, twice. Toggle **Auto Confirm User** ON. Copy each user's UUID.
 
----
+### 2. Run the migrations, in order
 
-## Step 3 — Create the room
+SQL Editor → New query → paste each file → Run:
 
-Still in the **SQL Editor**, run:
+1. `supabase/migrations/0001_initial_schema.sql` — rooms, room_members, messages, `is_room_member()`, two-member trigger
+2. `supabase/migrations/0002_profiles.sql` — profiles table + starter rows
+3. `supabase/migrations/0003_last_seen.sql` — `profiles.last_seen_at`
+4. `supabase/migrations/0004_rooms_pinned_wallpaper.sql` — room pin/wallpaper columns, rooms UPDATE policy, realtime
+5. `supabase/migrations/0005_message_extras.sql` — `reply_to`, `reactions`, `edited_at`, sender update/delete policies
+
+### 3. Run the remaining migrations
+
+5. `supabase/migrations/0005_message_extras.sql` — `reply_to`, `reactions`, `edited_at`, sender update/delete policies
+
+All migration files are idempotent (`if not exists` / `drop policy if exists`) — safe to re-run on the live database.
+
+### 4. Create the room + members
 
 ```sql
 INSERT INTO rooms DEFAULT VALUES RETURNING id;
-```
 
-Copy the `id` value that is returned. You will need it in Step 4.
-
----
-
-## Step 4 — Add the two members
-
-Replace `YOUR_ROOM_ID`, `USER_1_UUID`, and `USER_2_UUID` with your actual values, then run:
-
-```sql
 INSERT INTO room_members (room_id, user_id) VALUES
-  ('YOUR_ROOM_ID', 'USER_1_UUID'),
-  ('YOUR_ROOM_ID', 'USER_2_UUID');
+  ('ROOM_ID', 'USER_1_UUID'),
+  ('ROOM_ID', 'USER_2_UUID');
 ```
 
-A trigger enforces that a room can have at most two members, so this will fail if you try to add a third.
-
----
-
-## Step 5 — Enable Realtime
-
-In the SQL Editor, run:
+### 5. Realtime
 
 ```sql
-ALTER PUBLICATION supabase_realtime ADD TABLE messages;
+alter publication supabase_realtime add table public.messages;
+alter publication supabase_realtime add table public.rooms;
 ```
 
-If this errors with `table is already member of publication`, that is fine — it means Realtime is already enabled.
+`already member of publication` errors are fine.
 
----
+### 6. Storage bucket
 
-## Step 6 — Verify the setup
+Dashboard → **Storage → New bucket**:
 
-Run this to confirm everything is wired up:
+- Name: `chat-photos`
+- **Private** (not public)
+- File size limit: 5 MB, allowed MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
+
+Policies on the bucket:
 
 ```sql
--- Should return 1 room
-SELECT * FROM rooms;
+create policy "Authenticated users can upload"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'chat-photos' and auth.role() = 'authenticated');
 
--- Should return 2 members
-SELECT * FROM room_members;
-
--- RLS is enabled on all three tables
-SELECT tablename, rowsecurity FROM pg_tables
-WHERE schemaname = 'public' AND tablename IN ('rooms', 'room_members', 'messages');
+create policy "Room members can read photos"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'chat-photos');
 ```
 
-All three tables should show `rowsecurity = true`.
+Photos are displayed via `createSignedUrl(path, 3600)` — no public URLs.
 
 ---
 
-## Step 7 — Environment variables
+## Environment variables
 
-The `.env` file in your project root should contain:
+`.env` (gitignored):
 
 ```
 VITE_SUPABASE_URL=https://weotolsyzzqehhqslnyg.supabase.co
 VITE_SUPABASE_ANON_KEY=sb_publishable_J_3QGcwVKJr6Mx06QGVYRA_nXvCMuEv
 ```
 
-> **Where to find these values:** Dashboard → **Project Settings → API**
-> - **Project URL** → `VITE_SUPABASE_URL`
-> - **Publishable key** (or anon key) → `VITE_SUPABASE_ANON_KEY`
+Find them in **Project Settings → API** (Project URL + publishable/anon key).
 
-`.env` is in `.gitignore` and will not be committed.
+Vercel: same two variables under **Project → Settings → Environment Variables**.
 
 ---
 
-## Step 8 — Test
+## RLS summary
 
-1. Run `npm run dev`.
-2. Open the app in **two different browsers** (e.g. Chrome and Firefox, or one normal + one incognito window).
-3. Log in as `ramzhw` in one and `blackkity5588` in the other.
-4. Send a message — it should appear instantly in the other window.
-5. Check the check marks:
-   - `✓` = message saved
-   - `✓✓` = recipient has the chat open and has read it
-6. Type in one window — the other should show the typing indicator.
-7. Refresh — messages should persist.
+| Table | Operation | Rule |
+|---|---|---|
+| `rooms` | SELECT | Must be a member |
+| `rooms` | UPDATE | Must be a member (pin + wallpaper) |
+| `room_members` | SELECT | Must be a member |
+| `messages` | SELECT | Must be a member |
+| `messages` | INSERT | `sender_id = auth.uid()` + member |
+| `messages` | UPDATE | Sender: own message (reaction/edit). Recipient: incoming, `read_at` only |
+| `messages` | DELETE | Sender's own message |
+| `profiles` | SELECT | Any authenticated user (names/avatars/presence) |
+| `profiles` | INSERT/UPDATE | Own row only |
+| `storage.objects` | INSERT/SELECT | Authenticated, bucket `chat-photos` |
 
----
-
-## RLS Policy Summary
-
-| Table | Operation | Who | Rule |
-|---|---|---|---|
-| `rooms` | SELECT | authenticated | Must be a member of the room |
-| `rooms` | INSERT/UPDATE/DELETE | — | No policy (created manually) |
-| `room_members` | SELECT | authenticated | Must be a member of the room |
-| `room_members` | INSERT/UPDATE/DELETE | — | No policy (configured manually) |
-| `messages` | SELECT | authenticated | Must be a member of the room |
-| `messages` | INSERT | authenticated | `sender_id` must equal `auth.uid()` and user must be a room member |
-| `messages` | UPDATE | authenticated | Can only update messages **sent by someone else** and only set `read_at` |
-| `messages` | DELETE | — | No policy |
-
-**No `USING (true)` policies exist.** Every policy checks room membership via `auth.uid()`.
-
-The `is_room_member()` and `get_my_room_id()` functions use `SECURITY DEFINER` to avoid recursive RLS evaluation.
+`is_room_member()` / `get_my_room_id()` are `SECURITY DEFINER` to avoid recursive RLS.
 
 ---
 
-## What is NOT included
+## Verification
 
-- **Image/file upload** — Supabase Storage bucket and policies are not set up yet. The photo message UI is present but file upload is disabled. This is a remaining task for Milestone 2.5.
-- **Profile table** — User display names come from the Supabase Auth metadata, not a separate profiles table.
+```sql
+SELECT * FROM rooms;              -- 1 row, wallpaper_url/pinned may be set
+SELECT * FROM room_members;       -- 2 rows
+SELECT count(*) FROM messages;    -- grows as you chat
+SELECT user_id, display_name, last_seen_at FROM profiles;
+SELECT tablename, rowsecurity FROM pg_tables
+  WHERE schemaname = 'public'
+  AND tablename IN ('rooms', 'room_members', 'messages', 'profiles');
+```
+
+All four tables should show `rowsecurity = true`.
+
+**App test:** two browsers, both logged in — messages/typing/pins/wallpaper sync live; photos upload and appear in the gallery; header shows "Active now" / last-seen for the partner.

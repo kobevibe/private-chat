@@ -11,6 +11,8 @@ import ReactionPicker from './ReactionPicker'
 import DateSeparator from './DateSeparator'
 import ImageUploadPreview from './ImageUploadPreview'
 import UnreadBadge from './UnreadBadge'
+import VoiceRecorder from './VoiceRecorder'
+import VoicePlayer from './VoicePlayer'
 import { getDateLabel, formatLastSeen } from '../utils/dates'
 import { linkify } from '../utils/linkify'
 
@@ -60,6 +62,8 @@ export default function ChatApp({ session }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const [activeMsgId, setActiveMsgId] = useState(null)
   const [copiedToast, setCopiedToast] = useState(null)
+  const [recording, setRecording] = useState(false)
+  const [uploadingVoice, setUploadingVoice] = useState(false)
   const copyTimerRef = useRef(null)
   const toastTimerRef = useRef(null)
   const [signedUrls, setSignedUrls] = useState({})
@@ -250,19 +254,23 @@ export default function ChatApp({ session }) {
   const isReconnecting =
     channelStatus === 'CHANNEL_ERROR' || channelStatus === 'TIMED_OUT' || channelStatus === 'CLOSED'
 
-  // ---------- Signed URLs for photos ----------
+  // ---------- Signed URLs for photos + voice ----------
   useEffect(() => {
-    const photoMsgs = messages.filter(
-      (m) => m.message_type === 'photo' && m.media_url && !signedUrls[m.id]
+    const mediaMsgs = messages.filter(
+      (m) =>
+        (m.message_type === 'photo' || m.message_type === 'voice') &&
+        m.media_url &&
+        !signedUrls[m.id]
     )
-    if (!photoMsgs.length) return
+    if (!mediaMsgs.length) return
 
     let cancelled = false
     async function loadUrls() {
       const entries = await Promise.all(
-        photoMsgs.map(async (m) => {
+        mediaMsgs.map(async (m) => {
+          const bucket = m.message_type === 'voice' ? 'chat-audio' : 'chat-photos'
           const { data } = await supabase.storage
-            .from('chat-photos')
+            .from(bucket)
             .createSignedUrl(m.media_url, 3600)
           return [m.id, data?.signedUrl || null]
         })
@@ -615,6 +623,64 @@ export default function ChatApp({ session }) {
     return path
   }
 
+  // ---------- Voice messages ----------
+  const handleVoiceCancel = (reason) => {
+    setRecording(false)
+    if (reason === 'blocked') {
+      showToast('Microphone blocked — check browser permissions')
+    }
+  }
+
+  const handleVoiceSend = async (blob, duration) => {
+    setRecording(false)
+    if (!roomId) return
+
+    setUploadingVoice(true)
+    const type = blob.type || ''
+    const ext =
+      type.includes('mp4') ? 'm4a' :
+      type.includes('ogg') ? 'ogg' :
+      type.includes('wav') ? 'wav' : 'webm'
+    const path = `${crypto.randomUUID()}.${ext}`
+    const { error: uploadErr } = await supabase.storage
+      .from('chat-audio')
+      .upload(path, blob, { contentType: type || 'audio/webm' })
+
+    if (uploadErr) {
+      setUploadingVoice(false)
+      showToast('Failed to upload voice message')
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        room_id: roomId,
+        sender_id: user.id,
+        content: null,
+        message_type: 'voice',
+        media_url: path,
+        media_metadata: { duration },
+        reply_to: replyingTo?.id || null,
+      })
+      .select()
+      .single()
+
+    setUploadingVoice(false)
+
+    if (error) {
+      showToast('Failed to send voice message')
+      return
+    }
+
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === data.id)) return prev
+      return [...prev, data]
+    })
+    setReplyingTo(null)
+    scrollToBottom()
+  }
+
   // ---------- Edit / Delete ----------
   const startEdit = (msg) => {
     setEditingMsg(msg)
@@ -871,7 +937,9 @@ export default function ChatApp({ session }) {
               >
                 <p className="text-[11px] text-amber-300/90 font-medium">Pinned · {sender}</p>
                 <p className="text-xs text-white/60 truncate">
-                  {pinned.message_type === 'photo' ? '📷 Photo' : pinned.content || '...'}
+                  {pinned.message_type === 'photo' ? '📷 Photo'
+                    : pinned.message_type === 'voice' ? '🎤 Voice'
+                    : pinned.content || '...'}
                 </p>
               </button>
               <button
@@ -916,6 +984,7 @@ export default function ChatApp({ session }) {
             messages.map((msg, idx) => {
               const isOutgoing = msg.sender_id === user.id
               const isPhoto = msg.message_type === 'photo' && msg.media_url
+              const isVoice = msg.message_type === 'voice' && msg.media_url
               const showDate = idx === 0 ||
                 getDateLabel(msg.created_at) !== getDateLabel(messages[idx - 1].created_at)
               const myReaction = msg.reactions?.[user.id]
@@ -992,7 +1061,9 @@ export default function ChatApp({ session }) {
                                 {repliedMsg.sender_id === user.id ? 'You' : partnerName || 'Friend'}
                               </p>
                               <p className={`truncate max-w-[250px] ${isOutgoing ? 'text-white/70' : 'text-white/50'}`}>
-                                {repliedMsg.message_type === 'photo' ? '📷 Photo' : repliedMsg.content || '...'}
+                                {repliedMsg.message_type === 'photo' ? '📷 Photo'
+                                  : repliedMsg.message_type === 'voice' ? '🎤 Voice'
+                                  : repliedMsg.content || '...'}
                               </p>
                             </div>
                           )}
@@ -1006,6 +1077,15 @@ export default function ChatApp({ session }) {
                                 src={photoUrl}
                                 alt="Attachment"
                                 className="w-full max-h-56 object-cover hover:scale-[1.02] transition-transform duration-200"
+                              />
+                            </div>
+                          )}
+
+                          {isVoice && (
+                            <div className="mb-1.5 -mx-1 -mt-1">
+                              <VoicePlayer
+                                url={signedUrls[msg.id] || null}
+                                duration={msg.media_metadata?.duration}
                               />
                             </div>
                           )}
@@ -1145,7 +1225,9 @@ export default function ChatApp({ session }) {
                 Replying to {replyingTo.sender_id === user.id ? 'yourself' : (partnerName || 'Friend')}
               </p>
               <p className="text-xs text-white/50 truncate">
-                {replyingTo.message_type === 'photo' ? '📷 Photo' : replyingTo.content || '...'}
+                {replyingTo.message_type === 'photo' ? '📷 Photo'
+                  : replyingTo.message_type === 'voice' ? '🎤 Voice'
+                  : replyingTo.content || '...'}
               </p>
             </div>
             <button
@@ -1168,6 +1250,11 @@ export default function ChatApp({ session }) {
           uploading={uploadingImage}
         />
 
+        {/* Voice recorder */}
+        {recording && (
+          <VoiceRecorder onCancel={handleVoiceCancel} onSend={handleVoiceSend} />
+        )}
+
         {/* Composer */}
         <footer className="relative z-20 p-3 bg-black/50 backdrop-blur-2xl border-t border-white/15 shrink-0 pb-safe">
           <form onSubmit={handleSend} className="flex items-center gap-2">
@@ -1182,13 +1269,36 @@ export default function ChatApp({ session }) {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={uploadingImage}
+              disabled={uploadingImage || recording}
               className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white/80 flex items-center justify-center transition-colors border border-white/10 shrink-0 cursor-pointer disabled:opacity-50"
               title="Send a photo"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
               </svg>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+                  showToast('Voice messages not supported in this browser')
+                  return
+                }
+                if (imageFile) clearImage()
+                setRecording(true)
+              }}
+              disabled={uploadingImage || recording || uploadingVoice}
+              className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white/80 flex items-center justify-center transition-colors border border-white/10 shrink-0 cursor-pointer disabled:opacity-50"
+              title="Record a voice message"
+            >
+              {uploadingVoice ? (
+                <div className="w-4 h-4 border-2 border-white/25 border-t-white/80 rounded-full animate-spin" />
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 11a7 7 0 0014 0M12 18v3" />
+                </svg>
+              )}
             </button>
 
             <div className="flex-1 relative flex items-end">

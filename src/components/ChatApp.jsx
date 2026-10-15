@@ -40,6 +40,8 @@ export default function ChatApp({ session }) {
   const [presenceNow, setPresenceNow] = useState(() => Date.now())
   const [pinnedMessageId, setPinnedMessageId] = useState(null)
   const [showGallery, setShowGallery] = useState(false)
+  const [channelStatus, setChannelStatus] = useState('SUBSCRIBED')
+  const [privacyBlur, setPrivacyBlur] = useState(false)
   const [myName, setMyName] = useState('')
   const [myAvatar, setMyAvatar] = useState(DEFAULT_AVATAR)
   const [showProfileModal, setShowProfileModal] = useState(false)
@@ -53,7 +55,7 @@ export default function ChatApp({ session }) {
   const [editText, setEditText] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const [activeMsgId, setActiveMsgId] = useState(null)
-  const [copiedToast, setCopiedToast] = useState(false)
+  const [copiedToast, setCopiedToast] = useState(null)
   const copyTimerRef = useRef(null)
   const toastTimerRef = useRef(null)
   const [signedUrls, setSignedUrls] = useState({})
@@ -225,12 +227,24 @@ export default function ChatApp({ session }) {
           }
         }
       )
-      .subscribe()
+      .subscribe((status) => {
+        setChannelStatus(status)
+      })
+
+    const handleOnline = () => setChannelStatus('SUBSCRIBED')
+    const handleOffline = () => setChannelStatus('CHANNEL_ERROR')
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
 
     return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
       supabase.removeChannel(channel)
     }
   }, [roomId, user.id])
+
+  const isReconnecting =
+    channelStatus === 'CHANNEL_ERROR' || channelStatus === 'TIMED_OUT' || channelStatus === 'CLOSED'
 
   // ---------- Signed URLs for photos ----------
   useEffect(() => {
@@ -367,6 +381,13 @@ export default function ChatApp({ session }) {
     }
   }, [user.id])
 
+  // ---------- Privacy blur (app switcher) ----------
+  useEffect(() => {
+    const onVis = () => setPrivacyBlur(document.visibilityState === 'hidden')
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
   // ---------- Typing indicator (Realtime Broadcast) ----------
   useEffect(() => {
     if (!roomId) return
@@ -392,7 +413,7 @@ export default function ChatApp({ session }) {
 
   const sendTyping = () => {
     const now = Date.now()
-    if (now - lastTypingSentRef.current < 1000) return
+    if (now - lastTypingSentRef.current < 400) return
     lastTypingSentRef.current = now
     typingChannelRef.current?.send({
       type: 'broadcast',
@@ -424,6 +445,54 @@ export default function ChatApp({ session }) {
     if (!el) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
     setShowScrollBtn(!atBottom)
+  }
+
+  // ---------- Pull to refresh ----------
+  const pullStartRef = useRef(null)
+  const [pullDist, setPullDist] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
+  const PULL_MAX = 90
+  const PULL_TRIGGER = 64
+
+  const handlePullStart = (e) => {
+    const el = mainRef.current
+    if (!el || el.scrollTop > 0 || refreshing) return
+    if (e.target.closest?.('[id^="msg-"]')) return
+    pullStartRef.current = e.touches[0].clientY
+  }
+
+  const handlePullMove = (e) => {
+    if (pullStartRef.current == null || refreshing) return
+    const el = mainRef.current
+    if (!el || el.scrollTop > 0) {
+      pullStartRef.current = null
+      setPullDist(0)
+      return
+    }
+    const dy = e.touches[0].clientY - pullStartRef.current
+    if (dy <= 0) {
+      setPullDist(0)
+      return
+    }
+    // Resistance curve so it doesn't drag 1:1
+    setPullDist(Math.min(PULL_MAX, dy * 0.55))
+  }
+
+  const handlePullEnd = async () => {
+    if (pullStartRef.current == null) return
+    pullStartRef.current = null
+    if (pullDist >= PULL_TRIGGER) {
+      setRefreshing(true)
+      setPullDist(PULL_TRIGGER)
+      const { data } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('room_id', roomId)
+        .order('created_at', { ascending: true })
+      if (data) setMessages(data)
+      setRefreshing(false)
+    }
+    setPullDist(0)
   }
 
   // Auto-scroll on new messages
@@ -638,14 +707,42 @@ export default function ChatApp({ session }) {
     supabase.from('rooms').update({ pinned_message_id: next }).eq('id', roomId).then(() => {})
   }
 
+  // ---------- Export chat ----------
+  const exportChat = () => {
+    const lines = messages.map((m) => {
+      const time = new Date(m.created_at).toLocaleString([], {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      })
+      const who = m.sender_id === user.id ? (myName || 'Me') : (partnerName || 'Friend')
+      const body =
+        m.message_type === 'photo'
+          ? `[Photo] ${signedUrls[m.id] || m.media_url || ''}`
+          : m.content || ''
+      return `[${time}] ${who}: ${body}`
+    })
+
+    const blob = new Blob(
+      [`Our Space chat export — ${new Date().toLocaleString()}\n\n${lines.join('\n')}\n`],
+      { type: 'text/plain' }
+    )
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `our-space-chat-${new Date().toISOString().slice(0, 10)}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+    showToast('Exported')
+  }
+
   // ---------- Copy on long-press / right-click + swipe-to-reply ----------
   const suppressClickRef = useRef(false)
   const swipeRef = useRef(null)
 
-  const showToast = () => {
-    setCopiedToast(true)
+  const showToast = (msg = 'Copied') => {
+    setCopiedToast(msg)
     clearTimeout(toastTimerRef.current)
-    toastTimerRef.current = setTimeout(() => setCopiedToast(false), 1200)
+    toastTimerRef.current = setTimeout(() => setCopiedToast(null), 1200)
   }
 
   const copyMessage = (msg) => {
@@ -808,6 +905,15 @@ export default function ChatApp({ session }) {
               </svg>
             </button>
             <button
+              onClick={exportChat}
+              title="Export chat"
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white/90 transition-all border border-white/10 cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
+              </svg>
+            </button>
+            <button
               onClick={handleSignOut}
               title="Sign out"
               className="text-[10px] px-2 py-1 rounded-md font-medium border bg-white/15 border-white/20 text-white hover:bg-white/25 transition-all cursor-pointer"
@@ -816,6 +922,14 @@ export default function ChatApp({ session }) {
             </button>
           </div>
         </header>
+
+        {/* Reconnect banner */}
+        {isReconnecting && (
+          <div className="relative z-20 flex items-center justify-center gap-2 px-4 py-1.5 bg-amber-500/15 border-b border-amber-400/25 backdrop-blur-md shrink-0">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span className="text-[11px] text-amber-200 font-medium">Connection lost — reconnecting…</span>
+          </div>
+        )}
 
         {/* Pinned message bar */}
         {(() => {
@@ -859,10 +973,27 @@ export default function ChatApp({ session }) {
           ref={mainRef}
           onClick={() => setActiveMsgId(null)}
           onScroll={handleScroll}
+          onTouchStart={handlePullStart}
+          onTouchMove={handlePullMove}
+          onTouchEnd={handlePullEnd}
+          onTouchCancel={() => { pullStartRef.current = null; setPullDist(0) }}
           className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden px-4 pt-8 pb-6 space-y-5 focus:outline-none chat-scrollbar"
           tabIndex={0}
           aria-label="Message history"
         >
+          {/* Pull-to-refresh indicator */}
+          {(pullDist > 0 || refreshing) && (
+            <div
+              className="flex items-center justify-center text-white/60"
+              style={{ height: refreshing ? PULL_TRIGGER : pullDist, transition: pullDist === 0 ? 'height 0.2s ease' : 'none' }}
+            >
+              <div
+                className={`w-5 h-5 border-2 border-white/25 border-t-white/80 rounded-full ${refreshing ? 'animate-spin' : ''}`}
+                style={!refreshing ? { transform: `rotate(${(pullDist / PULL_MAX) * 360}deg)` } : undefined}
+              />
+            </div>
+          )}
+
           <div className="text-center my-2">
             <span className="text-[10px] uppercase tracking-widest px-3 py-1 rounded-full bg-white/10 backdrop-blur-md text-white/60 font-medium">
               Our Space • Encrypted
@@ -1217,10 +1348,19 @@ export default function ChatApp({ session }) {
         onClose={showGallery ? () => setShowGallery(false) : null}
       />
 
-      {/* Copied toast */}
+      {/* Copied/Exported toast */}
       {copiedToast && (
         <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-1.5 rounded-full bg-white/15 backdrop-blur-md border border-white/20 text-white/90 text-xs font-medium shadow-lg toast-in select-none pointer-events-none">
-          Copied
+          {copiedToast}
+        </div>
+      )}
+
+      {/* Privacy blur for app switcher */}
+      {privacyBlur && (
+        <div className="fixed inset-0 z-[200] bg-[#090d16]/95 backdrop-blur-2xl flex items-center justify-center">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg">
+            <span className="text-xl font-bold text-white">OS</span>
+          </div>
         </div>
       )}
     </div>

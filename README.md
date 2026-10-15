@@ -15,7 +15,8 @@ Live: https://private-chat-swart-pi.vercel.app
 - **Reactions** — ❤️ 👍 🔥, per-user, shown as chips under the bubble
 - **Edit / delete** — own messages only; edits show an "edited" label
 - **Photos** — upload up to 5MB (JPG/PNG/GIF/WebP) to a private Storage bucket; shown via signed URLs
-- **Shared photo gallery** — every photo ever sent, grid view in the header
+- **Voice messages** — record up to 5 min (tap to start, pause, send, or cancel); format auto-detects webm/mp4; custom player with seek + duration
+- **Shared photo gallery** — every photo ever sent; delete any photo (removes the message **and** the file from storage)
 - **Pinned message** — one shared pin; tap the bar to scroll to it
 - **Shared wallpaper** — one wallpaper for both accounts, crossfades live
 - **Unread badge** — count next to the partner's name; auto-clears at the bottom of the chat
@@ -25,6 +26,7 @@ Live: https://private-chat-swart-pi.vercel.app
 - **Profiles** — display name + avatar, editable from your avatar in the header
 - **Reconnect banner** — shown when the realtime channel drops
 - **Privacy blur** — chat is covered in the app switcher / when the tab is hidden
+- **Tab disguise** — browser tab reads "Translator" with a translator icon
 - **Wallpaper picker** — four built-in options
 - **Chat drafts** — input persists locally across reloads
 
@@ -62,9 +64,10 @@ VITE_SUPABASE_ANON_KEY=YOUR_PUBLISHABLE_KEY
 |---|---|
 | `rooms` | The single shared room; `pinned_message_id`, `wallpaper_url` |
 | `room_members` | Membership (max 2 via trigger) |
-| `messages` | Content, reactions, replies, edits, read receipts |
+| `messages` | Content, reactions, replies, edits, voice, read receipts |
 | `profiles` | Name, avatar, `last_seen_at` |
 | `storage.chat-photos` | Private photo bucket, signed URLs |
+| `storage.chat-audio` | Private voice bucket (20MB limit) |
 
 All tables have Row Level Security; every access check goes through `is_room_member()` or row ownership.
 
@@ -76,10 +79,10 @@ Pushed to GitHub → Vercel auto-deploys. Set `VITE_SUPABASE_URL` and `VITE_SUPA
 
 ```
 src/
-  components/   ChatApp, LoginScreen, ReactionPicker, PhotoGallery, …
+  components/   ChatApp, LoginScreen, ReactionPicker, PhotoGallery, VoiceRecorder, VoicePlayer, …
   hooks/        useAuth (Supabase session)
   lib/          supabase client
   utils/        dates (last-seen formatting), linkify
 supabase/
-  migrations/   0001–0004 SQL
+  migrations/   0001–0007 SQL
 ```

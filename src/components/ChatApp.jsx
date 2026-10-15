@@ -220,6 +220,13 @@ export default function ChatApp({ session }) {
       )
       .on(
         'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'messages', filter: `room_id=eq.${roomId}` },
+        (payload) => {
+          setMessages((prev) => prev.filter((m) => m.id !== payload.old.id))
+        }
+      )
+      .on(
+        'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
         (payload) => {
           setPinnedMessageId(payload.new.pinned_message_id || null)
@@ -714,9 +721,15 @@ export default function ChatApp({ session }) {
   }
 
   const deleteMessage = async (msgId) => {
+    const msg = messages.find((m) => m.id === msgId)
     const { error } = await supabase.from('messages').delete().eq('id', msgId)
     if (!error) {
       setMessages((prev) => prev.filter((m) => m.id !== msgId))
+      // Best-effort: also remove the backing file (photo/voice)
+      if (msg?.media_url) {
+        const bucket = msg.message_type === 'voice' ? 'chat-audio' : 'chat-photos'
+        supabase.storage.from(bucket).remove([msg.media_url]).then(() => {})
+      }
     }
     setConfirmDeleteId(null)
   }
@@ -1357,6 +1370,7 @@ export default function ChatApp({ session }) {
       <PhotoGallery
         photos={galleryPhotos}
         onOpen={(url) => { setShowGallery(false); setViewingPhoto(url) }}
+        onDelete={(id) => deleteMessage(id)}
         onClose={showGallery ? () => setShowGallery(false) : null}
       />
 

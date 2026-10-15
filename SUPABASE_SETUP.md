@@ -10,13 +10,14 @@ Current state of the database and how to recreate it from scratch.
 |---|---|
 | `rooms` | One shared room. Holds `pinned_message_id` and `wallpaper_url` (shared between both accounts) |
 | `room_members` | Two members per room (trigger-enforced max 2) |
-| `messages` | Text + photo messages, reactions, replies, edits, read receipts, pins |
+| `messages` | Text + photo + voice messages, reactions, replies, edits, read receipts, pins |
 | `profiles` | Display name, avatar URL, `last_seen_at` (presence) |
 | Storage bucket `chat-photos` | Private bucket for uploaded images, served via signed URLs |
+| Storage bucket `chat-audio` | Private bucket for voice messages (20MB), served via signed URLs |
 
 ### `messages` columns
 
-`id`, `room_id`, `sender_id`, `content`, `message_type` (`text` | `photo`), `media_url` (storage path for photos), `media_metadata`, `read_at`, `created_at`, plus:
+`id`, `room_id`, `sender_id`, `content`, `message_type` (`text` | `photo` | `voice`), `media_url` (storage path for photo/voice), `media_metadata` (voice: `{ duration }` seconds), `read_at`, `created_at`, plus:
 
 - `reply_to uuid` — quoted parent message
 - `reactions jsonb` — `{ user_id: emoji }` map
@@ -48,14 +49,12 @@ SQL Editor → New query → paste each file → Run:
 3. `supabase/migrations/0003_last_seen.sql` — `profiles.last_seen_at`
 4. `supabase/migrations/0004_rooms_pinned_wallpaper.sql` — room pin/wallpaper columns, rooms UPDATE policy, realtime
 5. `supabase/migrations/0005_message_extras.sql` — `reply_to`, `reactions`, `edited_at`, sender update/delete policies
-
-### 3. Run the remaining migrations
-
-5. `supabase/migrations/0005_message_extras.sql` — `reply_to`, `reactions`, `edited_at`, sender update/delete policies
+6. `supabase/migrations/0006_voice.sql` — voice message_type, `chat-audio` bucket + policies
+7. `supabase/migrations/0007_storage_delete.sql` — member message delete, storage file delete policy
 
 All migration files are idempotent (`if not exists` / `drop policy if exists`) — safe to re-run on the live database.
 
-### 4. Create the room + members
+### 3. Create the room + members
 
 ```sql
 INSERT INTO rooms DEFAULT VALUES RETURNING id;
@@ -65,7 +64,7 @@ INSERT INTO room_members (room_id, user_id) VALUES
   ('ROOM_ID', 'USER_2_UUID');
 ```
 
-### 5. Realtime
+### 4. Realtime
 
 ```sql
 alter publication supabase_realtime add table public.messages;
@@ -74,15 +73,15 @@ alter publication supabase_realtime add table public.rooms;
 
 `already member of publication` errors are fine.
 
-### 6. Storage bucket
+### 5. Storage buckets
 
-Dashboard → **Storage → New bucket**:
+Photos: Dashboard → **Storage → New bucket**:
 
-- Name: `chat-photos`
-- **Private** (not public)
-- File size limit: 5 MB, allowed MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
+- Name: `chat-photos`, **Private**, 5 MB limit, MIMEs: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
 
-Policies on the bucket:
+Voice: migration `0006` creates `chat-audio` automatically (20MB, audio MIMEs).
+
+Policies:
 
 ```sql
 create policy "Authenticated users can upload"
@@ -94,7 +93,9 @@ create policy "Room members can read photos"
   using (bucket_id = 'chat-photos');
 ```
 
-Photos are displayed via `createSignedUrl(path, 3600)` — no public URLs.
+(`0006` adds the same two for `chat-audio`; `0007` adds the DELETE policy for both.)
+
+Files are displayed via `createSignedUrl(path, 3600)` — no public URLs. Deleting a photo/voice message also deletes its file from storage.
 
 ---
 
@@ -123,10 +124,11 @@ Vercel: same two variables under **Project → Settings → Environment Variable
 | `messages` | SELECT | Must be a member |
 | `messages` | INSERT | `sender_id = auth.uid()` + member |
 | `messages` | UPDATE | Sender: own message (reaction/edit). Recipient: incoming, `read_at` only |
-| `messages` | DELETE | Sender's own message |
+| `messages` | DELETE | Any room member (delete for everyone) |
 | `profiles` | SELECT | Any authenticated user (names/avatars/presence) |
 | `profiles` | INSERT/UPDATE | Own row only |
-| `storage.objects` | INSERT/SELECT | Authenticated, bucket `chat-photos` |
+| `storage.objects` | INSERT/SELECT | Authenticated, bucket `chat-photos` or `chat-audio` |
+| `storage.objects` | DELETE | Authenticated, buckets `chat-photos` / `chat-audio` |
 
 `is_room_member()` / `get_my_room_id()` are `SECURITY DEFINER` to avoid recursive RLS.
 

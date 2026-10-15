@@ -16,7 +16,11 @@ import { linkify } from '../utils/linkify'
 
 const MAX_MESSAGE_LENGTH = 2000
 const TYPING_TIMEOUT = 3000
-const DEFAULT_AVATAR = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80'
+const DEFAULT_AVATAR =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" fill="#2a2a2e"/><circle cx="60" cy="47" r="21" fill="#6b6b70"/><path d="M18 116c4-25 21-38 42-38s38 13 42 38z" fill="#6b6b70"/></svg>`
+  )
 
 export default function ChatApp({ session }) {
   const user = session.user
@@ -447,54 +451,6 @@ export default function ChatApp({ session }) {
     setShowScrollBtn(!atBottom)
   }
 
-  // ---------- Pull to refresh ----------
-  const pullStartRef = useRef(null)
-  const [pullDist, setPullDist] = useState(0)
-  const [refreshing, setRefreshing] = useState(false)
-  const PULL_MAX = 90
-  const PULL_TRIGGER = 64
-
-  const handlePullStart = (e) => {
-    const el = mainRef.current
-    if (!el || el.scrollTop > 0 || refreshing) return
-    if (e.target.closest?.('[id^="msg-"]')) return
-    pullStartRef.current = e.touches[0].clientY
-  }
-
-  const handlePullMove = (e) => {
-    if (pullStartRef.current == null || refreshing) return
-    const el = mainRef.current
-    if (!el || el.scrollTop > 0) {
-      pullStartRef.current = null
-      setPullDist(0)
-      return
-    }
-    const dy = e.touches[0].clientY - pullStartRef.current
-    if (dy <= 0) {
-      setPullDist(0)
-      return
-    }
-    // Resistance curve so it doesn't drag 1:1
-    setPullDist(Math.min(PULL_MAX, dy * 0.55))
-  }
-
-  const handlePullEnd = async () => {
-    if (pullStartRef.current == null) return
-    pullStartRef.current = null
-    if (pullDist >= PULL_TRIGGER) {
-      setRefreshing(true)
-      setPullDist(PULL_TRIGGER)
-      const { data } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('room_id', roomId)
-        .order('created_at', { ascending: true })
-      if (data) setMessages(data)
-      setRefreshing(false)
-    }
-    setPullDist(0)
-  }
-
   // Auto-scroll on new messages
   useEffect(() => {
     const el = mainRef.current
@@ -707,34 +663,6 @@ export default function ChatApp({ session }) {
     supabase.from('rooms').update({ pinned_message_id: next }).eq('id', roomId).then(() => {})
   }
 
-  // ---------- Export chat ----------
-  const exportChat = () => {
-    const lines = messages.map((m) => {
-      const time = new Date(m.created_at).toLocaleString([], {
-        year: 'numeric', month: 'short', day: 'numeric',
-        hour: '2-digit', minute: '2-digit',
-      })
-      const who = m.sender_id === user.id ? (myName || 'Me') : (partnerName || 'Friend')
-      const body =
-        m.message_type === 'photo'
-          ? `[Photo] ${signedUrls[m.id] || m.media_url || ''}`
-          : m.content || ''
-      return `[${time}] ${who}: ${body}`
-    })
-
-    const blob = new Blob(
-      [`Our Space chat export — ${new Date().toLocaleString()}\n\n${lines.join('\n')}\n`],
-      { type: 'text/plain' }
-    )
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `our-space-chat-${new Date().toISOString().slice(0, 10)}.txt`
-    a.click()
-    URL.revokeObjectURL(url)
-    showToast('Exported')
-  }
-
   // ---------- Copy on long-press / right-click + swipe-to-reply ----------
   const suppressClickRef = useRef(false)
   const swipeRef = useRef(null)
@@ -905,15 +833,6 @@ export default function ChatApp({ session }) {
               </svg>
             </button>
             <button
-              onClick={exportChat}
-              title="Export chat"
-              className="p-2 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white/90 transition-all border border-white/10 cursor-pointer"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
-              </svg>
-            </button>
-            <button
               onClick={handleSignOut}
               title="Sign out"
               className="text-[10px] px-2 py-1 rounded-md font-medium border bg-white/15 border-white/20 text-white hover:bg-white/25 transition-all cursor-pointer"
@@ -973,27 +892,10 @@ export default function ChatApp({ session }) {
           ref={mainRef}
           onClick={() => setActiveMsgId(null)}
           onScroll={handleScroll}
-          onTouchStart={handlePullStart}
-          onTouchMove={handlePullMove}
-          onTouchEnd={handlePullEnd}
-          onTouchCancel={() => { pullStartRef.current = null; setPullDist(0) }}
           className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden px-4 pt-8 pb-6 space-y-5 focus:outline-none chat-scrollbar"
           tabIndex={0}
           aria-label="Message history"
         >
-          {/* Pull-to-refresh indicator */}
-          {(pullDist > 0 || refreshing) && (
-            <div
-              className="flex items-center justify-center text-white/60"
-              style={{ height: refreshing ? PULL_TRIGGER : pullDist, transition: pullDist === 0 ? 'height 0.2s ease' : 'none' }}
-            >
-              <div
-                className={`w-5 h-5 border-2 border-white/25 border-t-white/80 rounded-full ${refreshing ? 'animate-spin' : ''}`}
-                style={!refreshing ? { transform: `rotate(${(pullDist / PULL_MAX) * 360}deg)` } : undefined}
-              />
-            </div>
-          )}
-
           <div className="text-center my-2">
             <span className="text-[10px] uppercase tracking-widest px-3 py-1 rounded-full bg-white/10 backdrop-blur-md text-white/60 font-medium">
               Our Space • Encrypted

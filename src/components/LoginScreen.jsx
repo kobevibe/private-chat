@@ -6,9 +6,6 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [resetSent, setResetSent] = useState(false)
-  const [resetMode, setResetMode] = useState(false)
-  const [resetLoading, setResetLoading] = useState(false)
 
   const handleLogin = async (e) => {
     e.preventDefault()
@@ -28,23 +25,6 @@ export default function LoginScreen() {
     setLoading(false)
   }
 
-  const handleReset = async (e) => {
-    e.preventDefault()
-    setError('')
-    setResetLoading(true)
-
-    const { error: err } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: `${window.location.origin}/`,
-    })
-
-    if (err) {
-      setError(err.message)
-    } else {
-      setResetSent(true)
-    }
-    setResetLoading(false)
-  }
-
   return (
     <div className="flex flex-col h-dvh w-full bg-[#090d16] text-white items-center justify-center px-6 selection:bg-blue-500 selection:text-white">
       <div className="w-full max-w-sm">
@@ -58,7 +38,7 @@ export default function LoginScreen() {
         </div>
 
         {/* Form */}
-        <form onSubmit={resetMode ? handleReset : handleLogin} className="space-y-4">
+        <form onSubmit={handleLogin} className="space-y-4">
           <div>
             <label htmlFor="email" className="block text-xs font-medium text-slate-400 mb-1.5">
               Email
@@ -75,29 +55,21 @@ export default function LoginScreen() {
             />
           </div>
 
-          {!resetMode && (
-            <div>
-              <label htmlFor="password" className="block text-xs font-medium text-slate-400 mb-1.5">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                required
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-[#111726] border border-slate-700 text-white placeholder-slate-500 text-sm rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
-              />
-            </div>
-          )}
-
-          {resetMode && resetSent && (
-            <p className="text-xs text-emerald-400 bg-emerald-400/10 border border-emerald-400/20 rounded-lg px-3 py-2">
-              Reset link sent — check your email.
-            </p>
-          )}
+          <div>
+            <label htmlFor="password" className="block text-xs font-medium text-slate-400 mb-1.5">
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              required
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full bg-[#111726] border border-slate-700 text-white placeholder-slate-500 text-sm rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+            />
+          </div>
 
           {error && (
             <p className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
@@ -107,30 +79,12 @@ export default function LoginScreen() {
 
           <button
             type="submit"
-            disabled={loading || resetLoading}
+            disabled={loading}
             className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm transition-colors shadow-lg shadow-blue-600/25 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
           >
-            {resetMode
-              ? (resetLoading ? 'Sending…' : 'Send reset link')
-              : (loading ? 'Signing in…' : 'Sign in')}
+            {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-
-        {!resetMode ? (
-          <button
-            onClick={() => { setResetMode(true); setError(''); setResetSent(false) }}
-            className="block mx-auto mt-4 text-xs text-slate-400 hover:text-blue-400 transition-colors cursor-pointer"
-          >
-            Forgot password?
-          </button>
-        ) : (
-          <button
-            onClick={() => { setResetMode(false); setError(''); setResetSent(false) }}
-            className="block mx-auto mt-4 text-xs text-slate-400 hover:text-blue-400 transition-colors cursor-pointer"
-          >
-            ← Back to sign in
-          </button>
-        )}
 
         <p className="text-center text-xs text-slate-500 mt-6">
           Only two approved accounts have access.

@@ -29,6 +29,7 @@ Live: https://private-chat-swart-pi.vercel.app
 - **Tab disguise** — browser tab reads "Translator" with a translator icon
 - **Wallpaper picker** — four built-in options
 - **Chat drafts** — input persists locally across reloads
+- **Optimistic send** — messages, photos, and voice appear instantly; uploads happen in the background with a sending spinner, and failed sends show a tap-to-retry button
 
 ## Stack
 

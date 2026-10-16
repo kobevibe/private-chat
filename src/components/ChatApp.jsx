@@ -63,7 +63,6 @@ export default function ChatApp({ session }) {
   const [activeMsgId, setActiveMsgId] = useState(null)
   const [copiedToast, setCopiedToast] = useState(null)
   const [recording, setRecording] = useState(false)
-  const [uploadingVoice, setUploadingVoice] = useState(false)
   const copyTimerRef = useRef(null)
   const toastTimerRef = useRef(null)
   const [signedUrls, setSignedUrls] = useState({})
@@ -80,6 +79,8 @@ export default function ChatApp({ session }) {
   const fileInputRef = useRef(null)
   const partnerUserIdRef = useRef(null)
   const wallpaperRef = useRef(selectedWallpaper)
+  const pendingFilesRef = useRef({}) // tempId → File/Blob awaiting upload
+  const previewUrlsRef = useRef({}) // tempId → local object URL
 
   // Persist wallpaper + crossfade
   const setSelectedWallpaper = (url) => {
@@ -205,6 +206,25 @@ export default function ChatApp({ session }) {
           }
           setMessages((prev) => {
             if (prev.some((m) => m.id === payload.new.id)) return prev
+            // Own echo racing the insert promise → swap the matching pending bubble
+            if (payload.new.sender_id === user.id) {
+              const idx = prev.findIndex(
+                (m) =>
+                  m.pending &&
+                  m.sender_id === user.id &&
+                  (m.content || null) === (payload.new.content || null) &&
+                  m.message_type === payload.new.message_type &&
+                  (m.reply_to || null) === (payload.new.reply_to || null)
+              )
+              if (idx !== -1) {
+                const preview = prev[idx].localPreviewUrl
+                const next = [...prev]
+                next[idx] = preview
+                  ? { ...payload.new, localPreviewUrl: preview }
+                  : payload.new
+                return next
+              }
+            }
             return [...prev, payload.new]
           })
         }
@@ -474,8 +494,111 @@ export default function ChatApp({ session }) {
     if (atBottom) scrollToBottom()
   }, [messages, otherUserTyping, scrollToBottom])
 
-  // ---------- Send message ----------
-  const handleSend = async (e) => {
+  // ---------- Send message (optimistic — bubble appears instantly) ----------
+  const isTempId = (id) => typeof id === 'string' && id.startsWith('temp-')
+
+  const appendOptimistic = ({ content, message_type, media_metadata, reply_to, localPreviewUrl }) => {
+    const tempId = `temp-${crypto.randomUUID()}`
+    previewUrlsRef.current[tempId] = localPreviewUrl || null
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: tempId,
+        room_id: roomId,
+        sender_id: user.id,
+        content: content ?? null,
+        message_type,
+        media_url: null,
+        media_metadata: media_metadata || null,
+        reply_to: reply_to || null,
+        read_at: null,
+        created_at: new Date().toISOString(),
+        pending: true,
+        failed: false,
+        localPreviewUrl: localPreviewUrl || null,
+        uploadPath: null,
+      },
+    ])
+    return tempId
+  }
+
+  const settlePending = (tempId, realMsg) => {
+    const preview = previewUrlsRef.current[tempId]
+    delete previewUrlsRef.current[tempId]
+    delete pendingFilesRef.current[tempId]
+    const msg = preview ? { ...realMsg, localPreviewUrl: preview } : realMsg
+    setMessages((prev) => {
+      const withoutDup = prev.filter((m) => m.id !== msg.id)
+      if (withoutDup.some((m) => m.id === tempId)) {
+        return withoutDup.map((m) => (m.id === tempId ? msg : m))
+      }
+      return [...withoutDup, msg]
+    })
+  }
+
+  const failPending = (tempId) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === tempId ? { ...m, pending: false, failed: true } : m))
+    )
+  }
+
+  const uploadMedia = async (messageType, file) => {
+    const isVoice = messageType === 'voice'
+    let ext
+    if (isVoice) {
+      const t = file.type || ''
+      ext = t.includes('mp4') ? 'm4a' : t.includes('ogg') ? 'ogg' : t.includes('wav') ? 'wav' : 'webm'
+    } else {
+      ext = file.name?.split('.').pop() || 'jpg'
+    }
+    const path = `${crypto.randomUUID()}.${ext}`
+    const bucket = isVoice ? 'chat-audio' : 'chat-photos'
+    const opts = isVoice ? { contentType: file.type || 'audio/webm' } : undefined
+    const { error } = await supabase.storage.from(bucket).upload(path, file, opts)
+    return error ? null : path
+  }
+
+  const deliver = async (tempMsg) => {
+    let path = tempMsg.uploadPath || null
+    const file = pendingFilesRef.current[tempMsg.id]
+
+    if (!path && file) {
+      setUploadingImage(true)
+      path = await uploadMedia(tempMsg.message_type, file)
+      setUploadingImage(false)
+      if (!path) {
+        failPending(tempMsg.id)
+        setSendError('Upload failed — tap “Retry” on the message.')
+        return
+      }
+      delete pendingFilesRef.current[tempMsg.id]
+      setMessages((prev) => prev.map((m) => (m.id === tempMsg.id ? { ...m, uploadPath: path } : m)))
+    }
+
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        room_id: roomId,
+        sender_id: user.id,
+        content: tempMsg.content || null,
+        message_type: tempMsg.message_type,
+        media_url: path,
+        media_metadata: tempMsg.media_metadata || null,
+        reply_to: tempMsg.reply_to || null,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      failPending(tempMsg.id)
+      setSendError('Message failed to send — tap “Retry”.')
+      return
+    }
+
+    settlePending(tempMsg.id, data)
+  }
+
+  const handleSend = (e) => {
     e.preventDefault()
     const text = inputText.trim()
     if ((!text && !imageFile) || !roomId) return
@@ -485,46 +608,51 @@ export default function ChatApp({ session }) {
     }
 
     setSendError('')
-    let mediaPath = null
+    const file = imageFile || null
+    const messageType = file ? 'photo' : 'text'
+    const replyId = replyingTo && !isTempId(replyingTo.id) ? replyingTo.id : null
+    const localPreviewUrl = file ? URL.createObjectURL(file) : null
 
-    if (imageFile) {
-      setUploadingImage(true)
-      mediaPath = await uploadImage()
-      setUploadingImage(false)
-      if (!mediaPath) {
-        setSendError('Failed to upload image. Try again.')
-        return
-      }
-    }
-
-    const { data, error } = await supabase
-      .from('messages')
-      .insert({
-        room_id: roomId,
-        sender_id: user.id,
-        content: text || null,
-        message_type: mediaPath ? 'photo' : 'text',
-        media_url: mediaPath,
-        reply_to: replyingTo?.id || null,
-      })
-      .select()
-      .single()
-
-    if (error) {
-      setSendError('Failed to send. Check your connection and try again.')
-      return
-    }
-
-    setMessages((prev) => {
-      if (prev.some((m) => m.id === data.id)) return prev
-      return [...prev, data]
+    const tempId = appendOptimistic({
+      content: text || null,
+      message_type: messageType,
+      reply_to: replyId,
+      localPreviewUrl,
     })
+    if (file) pendingFilesRef.current[tempId] = file
 
+    // Instant UI reset — no waiting for the network
     setInputText('')
-    setReplyingTo(null)
-    clearImage()
     localStorage.removeItem('our-space-draft')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    setReplyingTo(null)
+    clearImage()
+
+    deliver({
+      id: tempId,
+      content: text || null,
+      message_type: messageType,
+      reply_to: replyId,
+      media_metadata: null,
+      uploadPath: null,
+    })
+  }
+
+  const retrySend = (msgId) => {
+    const m = messages.find((x) => x.id === msgId)
+    if (!m || !m.failed) return
+    setSendError('')
+    setMessages((prev) =>
+      prev.map((x) => (x.id === msgId ? { ...x, pending: true, failed: false } : x))
+    )
+    deliver({
+      id: m.id,
+      content: m.content,
+      message_type: m.message_type,
+      reply_to: m.reply_to,
+      media_metadata: m.media_metadata,
+      uploadPath: m.uploadPath,
+    })
   }
 
   const handleKeyDown = (e) => {
@@ -619,17 +747,6 @@ export default function ChatApp({ session }) {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const uploadImage = async () => {
-    if (!imageFile) return null
-    const ext = imageFile.name.split('.').pop() || 'jpg'
-    const path = `${crypto.randomUUID()}.${ext}`
-    const { error } = await supabase.storage
-      .from('chat-photos')
-      .upload(path, imageFile)
-    if (error) return null
-    return path
-  }
-
   // ---------- Voice messages ----------
   const handleVoiceCancel = (reason) => {
     setRecording(false)
@@ -638,54 +755,30 @@ export default function ChatApp({ session }) {
     }
   }
 
-  const handleVoiceSend = async (blob, duration) => {
+  const handleVoiceSend = (blob, duration) => {
     setRecording(false)
     if (!roomId) return
 
-    setUploadingVoice(true)
-    const type = blob.type || ''
-    const ext =
-      type.includes('mp4') ? 'm4a' :
-      type.includes('ogg') ? 'ogg' :
-      type.includes('wav') ? 'wav' : 'webm'
-    const path = `${crypto.randomUUID()}.${ext}`
-    const { error: uploadErr } = await supabase.storage
-      .from('chat-audio')
-      .upload(path, blob, { contentType: type || 'audio/webm' })
-
-    if (uploadErr) {
-      setUploadingVoice(false)
-      showToast('Failed to upload voice message')
-      return
-    }
-
-    const { data, error } = await supabase
-      .from('messages')
-      .insert({
-        room_id: roomId,
-        sender_id: user.id,
-        content: null,
-        message_type: 'voice',
-        media_url: path,
-        media_metadata: { duration },
-        reply_to: replyingTo?.id || null,
-      })
-      .select()
-      .single()
-
-    setUploadingVoice(false)
-
-    if (error) {
-      showToast('Failed to send voice message')
-      return
-    }
-
-    setMessages((prev) => {
-      if (prev.some((m) => m.id === data.id)) return prev
-      return [...prev, data]
+    const replyId = replyingTo && !isTempId(replyingTo.id) ? replyingTo.id : null
+    const localPreviewUrl = URL.createObjectURL(blob)
+    const tempId = appendOptimistic({
+      content: null,
+      message_type: 'voice',
+      media_metadata: { duration },
+      reply_to: replyId,
+      localPreviewUrl,
     })
+    pendingFilesRef.current[tempId] = blob
     setReplyingTo(null)
-    scrollToBottom()
+
+    deliver({
+      id: tempId,
+      content: null,
+      message_type: 'voice',
+      reply_to: replyId,
+      media_metadata: { duration },
+      uploadPath: null,
+    })
   }
 
   // ---------- Edit / Delete ----------
@@ -730,6 +823,9 @@ export default function ChatApp({ session }) {
         const bucket = msg.message_type === 'voice' ? 'chat-audio' : 'chat-photos'
         supabase.storage.from(bucket).remove([msg.media_url]).then(() => {})
       }
+      if (msg?.localPreviewUrl) URL.revokeObjectURL(msg.localPreviewUrl)
+      delete previewUrlsRef.current[msgId]
+      delete pendingFilesRef.current[msgId]
     }
     setConfirmDeleteId(null)
   }
@@ -799,7 +895,7 @@ export default function ChatApp({ session }) {
     bubbleCol.style.transform = 'translateX(0)'
     const arrow = bubbleCol.querySelector('.swipe-reply-arrow')
     if (arrow) arrow.style.opacity = '0'
-    if (s.offset >= 48) {
+    if (s.offset >= 48 && !s.msg.pending && !s.msg.failed) {
       suppressClickRef.current = true
       setReplyingTo(s.msg)
     }
@@ -996,8 +1092,12 @@ export default function ChatApp({ session }) {
           ) : (
             messages.map((msg, idx) => {
               const isOutgoing = msg.sender_id === user.id
-              const isPhoto = msg.message_type === 'photo' && msg.media_url
-              const isVoice = msg.message_type === 'voice' && msg.media_url
+              const isPhoto =
+                msg.message_type === 'photo' && (msg.media_url || msg.localPreviewUrl)
+              const isVoice =
+                msg.message_type === 'voice' && (msg.media_url || msg.localPreviewUrl)
+              const isPendingMsg = !!msg.pending
+              const isFailedMsg = !!msg.failed
               const showDate = idx === 0 ||
                 getDateLabel(msg.created_at) !== getDateLabel(messages[idx - 1].created_at)
               const myReaction = msg.reactions?.[user.id]
@@ -1005,7 +1105,7 @@ export default function ChatApp({ session }) {
               const repliedMsg = msg.reply_to ? messages.find((m) => m.id === msg.reply_to) : null
               const isEditing = editingMsg?.id === msg.id
               const showDeleteConfirm = confirmDeleteId === msg.id
-              const photoUrl = signedUrls[msg.id] || msg.media_url
+              const photoUrl = signedUrls[msg.id] || msg.localPreviewUrl || msg.media_url
               const emojiCounts = {}
               for (const emoji of Object.values(reactions)) {
                 emojiCounts[emoji] = (emojiCounts[emoji] || 0) + 1
@@ -1036,18 +1136,20 @@ export default function ChatApp({ session }) {
                         </span>
 
                         {/* Reaction picker on hover */}
-                        <ReactionPicker
-                          myReaction={myReaction}
-                          open={activeMsgId === msg.id}
-                          onReact={(emoji) => { addReaction(msg.id, emoji); setActiveMsgId(null) }}
-                          onReply={() => { setReplyingTo(msg); setActiveMsgId(null) }}
-                          onEdit={() => { startEdit(msg); setActiveMsgId(null) }}
-                          onDelete={() => { setConfirmDeleteId(msg.id); setActiveMsgId(null) }}
-                          onPin={() => { togglePin(msg.id); setActiveMsgId(null) }}
-                          isPinned={pinnedMessageId === msg.id}
-                          isOwn={isOutgoing}
-                          side={isOutgoing ? 'right' : 'left'}
-                        />
+                        {!isPendingMsg && !isFailedMsg && (
+                          <ReactionPicker
+                            myReaction={myReaction}
+                            open={activeMsgId === msg.id}
+                            onReact={(emoji) => { addReaction(msg.id, emoji); setActiveMsgId(null) }}
+                            onReply={() => { setReplyingTo(msg); setActiveMsgId(null) }}
+                            onEdit={() => { startEdit(msg); setActiveMsgId(null) }}
+                            onDelete={() => { setConfirmDeleteId(msg.id); setActiveMsgId(null) }}
+                            onPin={() => { togglePin(msg.id); setActiveMsgId(null) }}
+                            isPinned={pinnedMessageId === msg.id}
+                            isOwn={isOutgoing}
+                            side={isOutgoing ? 'right' : 'left'}
+                          />
+                        )}
 
                         <div
                           onClick={(e) => handleBubbleClick(msg.id, e)}
@@ -1083,21 +1185,34 @@ export default function ChatApp({ session }) {
 
                           {isPhoto && (
                             <div
-                              className="mb-1.5 -mx-1 -mt-1 overflow-hidden rounded-xl cursor-pointer"
-                              onClick={(e) => { e.stopPropagation(); setViewingPhoto(photoUrl) }}
+                              className={`relative mb-1.5 -mx-1 -mt-1 overflow-hidden rounded-xl ${photoUrl ? 'cursor-pointer' : ''}`}
+                              onClick={(e) => { if (!photoUrl) return; e.stopPropagation(); setViewingPhoto(photoUrl) }}
                             >
-                              <img
-                                src={photoUrl}
-                                alt="Attachment"
-                                className="w-full max-h-56 object-cover hover:scale-[1.02] transition-transform duration-200"
-                              />
+                              {photoUrl ? (
+                                <>
+                                  <img
+                                    src={photoUrl}
+                                    alt="Attachment"
+                                    className={`w-full max-h-56 object-cover transition-transform duration-200 ${isPendingMsg ? 'opacity-70' : 'hover:scale-[1.02]'}`}
+                                  />
+                                  {isPendingMsg && (
+                                    <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                                      <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <div className="w-44 h-28 flex items-center justify-center bg-white/10">
+                                  <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                </div>
+                              )}
                             </div>
                           )}
 
                           {isVoice && (
                             <div className="mb-1.5 -mx-1 -mt-1">
                               <VoicePlayer
-                                url={signedUrls[msg.id] || null}
+                                url={signedUrls[msg.id] || msg.localPreviewUrl || null}
                                 duration={msg.media_metadata?.duration}
                               />
                             </div>
@@ -1186,7 +1301,22 @@ export default function ChatApp({ session }) {
                           <div className={`flex items-center justify-end gap-1 text-[10px] mt-1 select-none ${isOutgoing ? 'text-white/70' : 'text-white/40'}`}>
                             {msg.edited_at && <span className="italic opacity-70">edited</span>}
                             <span>{formatTime(msg.created_at)}</span>
-                            {isOutgoing && (
+                            {isOutgoing && isPendingMsg && (
+                              <span className="flex items-center gap-1 text-white/60" title="Sending">
+                                <span className="w-2.5 h-2.5 border border-white/50 border-t-transparent rounded-full animate-spin inline-block" />
+                                sending
+                              </span>
+                            )}
+                            {isOutgoing && isFailedMsg && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); retrySend(msg.id) }}
+                                className="text-red-300 hover:text-red-100 font-bold underline underline-offset-2 cursor-pointer"
+                                title="Tap to retry"
+                              >
+                                failed · retry
+                              </button>
+                            )}
+                            {isOutgoing && !isPendingMsg && !isFailedMsg && (
                               <span className={`font-bold ${msg.read_at ? 'text-blue-200' : 'text-white/50'}`} title={msg.read_at ? 'Read' : 'Sent'}>
                                 {msg.read_at ? '✓✓' : '✓'}
                               </span>
@@ -1300,18 +1430,14 @@ export default function ChatApp({ session }) {
                 if (imageFile) clearImage()
                 setRecording(true)
               }}
-              disabled={uploadingImage || recording || uploadingVoice}
+              disabled={uploadingImage || recording}
               className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white/80 flex items-center justify-center transition-colors border border-white/10 shrink-0 cursor-pointer disabled:opacity-50"
               title="Record a voice message"
             >
-              {uploadingVoice ? (
-                <div className="w-4 h-4 border-2 border-white/25 border-t-white/80 rounded-full animate-spin" />
-              ) : (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 11a7 7 0 0014 0M12 18v3" />
-                </svg>
-              )}
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 11a7 7 0 0014 0M12 18v3" />
+              </svg>
             </button>
 
             <div className="flex-1 relative flex items-end">

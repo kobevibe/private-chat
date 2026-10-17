@@ -18,6 +18,7 @@ import { getDateLabel, formatLastSeen } from '../utils/dates'
 import { linkify } from '../utils/linkify'
 
 const MAX_MESSAGE_LENGTH = 2000
+const PULL_THRESHOLD = 72 // px of pull to trigger reload
 const TYPING_TIMEOUT = 3000
 const DEFAULT_AVATAR =
   "data:image/svg+xml;utf8," +
@@ -78,6 +79,48 @@ export default function ChatApp({ session }) {
   const pendingFilesRef = useRef({}) // tempId → File/Blob awaiting upload
   const previewUrlsRef = useRef({}) // tempId → local object URL
   const forceBottomRef = useRef(false) // next messages change → instant jump to sent message
+  const [pullDist, setPullDist] = useState(0) // header pull-to-reload distance
+  const pullRef = useRef({ startY: 0, active: false, engaged: false })
+  const suppressClickUntilRef = useRef(0) // swallows taps that were actually drags
+
+  // ---------- Header pull-to-reload ----------
+  const onPullDown = (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    pullRef.current = { startY: e.clientY, active: true, engaged: false }
+  }
+
+  const onPullMove = (e) => {
+    const s = pullRef.current
+    if (!s.active) return
+    const dy = e.clientY - s.startY
+    if (dy > 8) s.engaged = true
+    setPullDist(s.engaged ? Math.max(0, Math.min(dy * 0.5, 96)) : 0)
+  }
+
+  const onPullEnd = (e) => {
+    const s = pullRef.current
+    if (!s.active) return
+    s.active = false
+    if (s.engaged) suppressClickUntilRef.current = Date.now() + 400
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* pointer already released */
+    }
+    if (s.engaged && pullDist >= PULL_THRESHOLD) {
+      window.location.reload()
+      return // keep the indicator up while the page reloads
+    }
+    setPullDist(0)
+  }
+
+  const onHeaderClickCapture = (e) => {
+    if (Date.now() < suppressClickUntilRef.current) {
+      e.stopPropagation()
+      e.preventDefault()
+    }
+  }
 
   // Persist wallpaper + crossfade
   const setSelectedWallpaper = (url) => {
@@ -949,8 +992,43 @@ export default function ChatApp({ session }) {
           <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle,transparent_55%,rgba(0,0,0,0.55)_100%)]" />
         </div>
 
-        {/* Header */}
-        <header className="relative z-20 flex items-center justify-between px-4 py-3 bg-black/45 backdrop-blur-md border-b border-white/15 select-none shrink-0">
+        {/* Header — pull down anywhere on it to reload */}
+        <header
+          onPointerDown={onPullDown}
+          onPointerMove={onPullMove}
+          onPointerUp={onPullEnd}
+          onPointerCancel={onPullEnd}
+          onClickCapture={onHeaderClickCapture}
+          onDragStart={(e) => e.preventDefault()}
+          style={{ touchAction: 'none' }}
+          className="relative z-20 flex items-center justify-between px-4 py-3 bg-black/45 backdrop-blur-md border-b border-white/15 select-none shrink-0"
+        >
+          {/* Pull indicator */}
+          {pullDist > 0 && (
+            <div
+              className="absolute left-1/2 top-full pointer-events-none flex flex-col items-center"
+              style={{ transform: `translateX(-50%) translateY(${pullDist}px)`, opacity: Math.min(pullDist / 32, 1) }}
+            >
+              <div
+                className={`w-8 h-8 rounded-full flex items-center justify-center border transition-colors ${
+                  pullDist >= PULL_THRESHOLD
+                    ? 'bg-blue-500 border-blue-400 text-white'
+                    : 'bg-black/60 border-white/25 text-white/80'
+                }`}
+              >
+                <svg
+                  className="w-4 h-4"
+                  style={{ transform: `rotate(${pullDist * 4}deg)` }}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2.5">
             {/* Partner info */}
             <img

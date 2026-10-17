@@ -9,6 +9,8 @@
     overflow: hidden;
     /* Kill double-tap zoom (pinch zoom still works) */
     touch-action: manipulation;
+    /* No browser pull-to-refresh / rubber-band — the app has its own */
+    overscroll-behavior: none;
     background-color: #090d16;
     color: #f3f4f6;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;

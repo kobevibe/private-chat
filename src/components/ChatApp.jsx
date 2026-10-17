@@ -735,29 +735,6 @@ export default function ChatApp({ session }) {
     })
   }
 
-  const handleStickerSend = (emoji) => {
-    if (!roomId || !emoji) return
-    setSendError('')
-    const replyId = replyingTo && !isTempId(replyingTo.id) ? replyingTo.id : null
-    const tempId = appendOptimistic({
-      content: emoji,
-      message_type: 'text',
-      media_metadata: { sticker: true },
-      reply_to: replyId,
-    })
-    setReplyingTo(null)
-    buzz(HAPTIC.sticker)
-    deliver({
-      id: tempId,
-      content: emoji,
-      message_type: 'text',
-      reply_to: replyId,
-      media_metadata: { sticker: true },
-      media_url: null,
-      uploadPath: null,
-    })
-  }
-
   const retrySend = (msgId) => {
     const m = messages.find((x) => x.id === msgId)
     if (!m || !m.failed) return
@@ -1597,7 +1574,6 @@ export default function ChatApp({ session }) {
             onTyping={sendTyping}
             onFileSelect={handleFileSelect}
             onSendGif={handleGifSend}
-            onSendSticker={handleStickerSend}
             onMic={() => {
               if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
                 showToast('Voice messages not supported in this browser')

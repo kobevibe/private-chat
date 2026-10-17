@@ -9,7 +9,6 @@ export default function Composer({
   onFileSelect,
   onMic,
   onSendGif,
-  onSendSticker,
   hasAttachment,
   uploading,
   recording,
@@ -67,10 +66,6 @@ export default function Composer({
             setShowPicker(false)
             onSendGif(gif)
           }}
-          onPickSticker={(emoji) => {
-            setShowPicker(false)
-            onSendSticker(emoji)
-          }}
           onClose={() => setShowPicker(false)}
         />
       )}
@@ -104,8 +99,8 @@ export default function Composer({
         className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors border shrink-0 cursor-pointer disabled:opacity-50 ${
           showPicker ? 'bg-[#007aff]/25 border-blue-400/50 text-blue-300' : 'bg-white/10 hover:bg-white/20 text-white/80 border-white/10'
         }`}
-        title="GIFs and stickers"
-        aria-label="GIFs and stickers"
+        title="Send a GIF"
+        aria-label="Send a GIF"
         aria-expanded={showPicker}
       >
         <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">

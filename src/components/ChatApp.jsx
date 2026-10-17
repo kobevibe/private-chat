@@ -7,6 +7,7 @@ import WallpaperPicker from './WallpaperPicker'
 import ProfileEdit from './ProfileEdit'
 import PhotoViewer from './PhotoViewer'
 import PhotoGallery from './PhotoGallery'
+import { buzz, HAPTIC } from '../lib/haptics'
 import ReactionPicker from './ReactionPicker'
 import DateSeparator from './DateSeparator'
 import ImageUploadPreview from './ImageUploadPreview'
@@ -237,6 +238,7 @@ export default function ChatApp({ session }) {
         (payload) => {
           if (payload.new.sender_id !== user.id) {
             setPartnerLastSeen(payload.new.created_at)
+            buzz(HAPTIC.receive)
           }
           setMessages((prev) => {
             if (prev.some((m) => m.id === payload.new.id)) return prev
@@ -321,6 +323,7 @@ export default function ChatApp({ session }) {
       (m) =>
         (m.message_type === 'photo' || m.message_type === 'voice') &&
         m.media_url &&
+        !m.media_url.startsWith('http') && // GIFs hotlink Giphy CDN — nothing to sign
         !signedUrls[m.id]
     )
     if (!mediaMsgs.length) return
@@ -428,8 +431,12 @@ export default function ChatApp({ session }) {
   ).length
 
   const galleryPhotos = messages
-    .filter((m) => m.message_type === 'photo' && signedUrls[m.id])
-    .map((m) => ({ id: m.id, url: signedUrls[m.id] }))
+    .filter(
+      (m) =>
+        m.message_type === 'photo' &&
+        (signedUrls[m.id] || (m.media_url && m.media_url.startsWith('http')))
+    )
+    .map((m) => ({ id: m.id, url: signedUrls[m.id] || m.media_url }))
     .reverse()
 
   // ---------- Presence: heartbeat + partner last-seen ----------
@@ -562,7 +569,7 @@ export default function ChatApp({ session }) {
   // ---------- Send message (optimistic — bubble appears instantly) ----------
   const isTempId = (id) => typeof id === 'string' && id.startsWith('temp-')
 
-  const appendOptimistic = ({ content, message_type, media_metadata, reply_to, localPreviewUrl }) => {
+  const appendOptimistic = ({ content, message_type, media_url, media_metadata, reply_to, localPreviewUrl }) => {
     const tempId = `temp-${crypto.randomUUID()}`
     previewUrlsRef.current[tempId] = localPreviewUrl || null
     forceBottomRef.current = true // focus on the message being sent — no drift
@@ -574,7 +581,7 @@ export default function ChatApp({ session }) {
         sender_id: user.id,
         content: content ?? null,
         message_type,
-        media_url: null,
+        media_url: media_url || null,
         media_metadata: media_metadata || null,
         reply_to: reply_to || null,
         read_at: null,
@@ -625,7 +632,7 @@ export default function ChatApp({ session }) {
   }
 
   const deliver = async (tempMsg) => {
-    let path = tempMsg.uploadPath || null
+    let path = tempMsg.media_url || tempMsg.uploadPath || null
     const file = pendingFilesRef.current[tempMsg.id]
 
     if (!path && file) {
@@ -688,6 +695,7 @@ export default function ChatApp({ session }) {
     // Instant UI reset — Composer clears its own input on true
     setReplyingTo(null)
     clearImage()
+    buzz(HAPTIC.send)
 
     deliver({
       id: tempId,
@@ -695,9 +703,58 @@ export default function ChatApp({ session }) {
       message_type: messageType,
       reply_to: replyId,
       media_metadata: null,
+      media_url: null,
       uploadPath: null,
     })
     return true
+  }
+
+  // ---------- GIF + stickers ----------
+  const handleGifSend = (gif) => {
+    if (!roomId || !gif?.url) return
+    setSendError('')
+    const replyId = replyingTo && !isTempId(replyingTo.id) ? replyingTo.id : null
+    const tempId = appendOptimistic({
+      content: null,
+      message_type: 'photo',
+      media_url: gif.url,
+      media_metadata: { gif: true },
+      reply_to: replyId,
+    })
+    setReplyingTo(null)
+    buzz(HAPTIC.gif)
+    deliver({
+      id: tempId,
+      content: null,
+      message_type: 'photo',
+      reply_to: replyId,
+      media_url: gif.url,
+      media_metadata: { gif: true },
+      uploadPath: null,
+    })
+  }
+
+  const handleStickerSend = (emoji) => {
+    if (!roomId || !emoji) return
+    setSendError('')
+    const replyId = replyingTo && !isTempId(replyingTo.id) ? replyingTo.id : null
+    const tempId = appendOptimistic({
+      content: emoji,
+      message_type: 'text',
+      media_metadata: { sticker: true },
+      reply_to: replyId,
+    })
+    setReplyingTo(null)
+    buzz(HAPTIC.sticker)
+    deliver({
+      id: tempId,
+      content: emoji,
+      message_type: 'text',
+      reply_to: replyId,
+      media_metadata: { sticker: true },
+      media_url: null,
+      uploadPath: null,
+    })
   }
 
   const retrySend = (msgId) => {
@@ -712,6 +769,7 @@ export default function ChatApp({ session }) {
       content: m.content,
       message_type: m.message_type,
       reply_to: m.reply_to,
+      media_url: m.media_url,
       media_metadata: m.media_metadata,
       uploadPath: m.uploadPath,
     })
@@ -823,6 +881,7 @@ export default function ChatApp({ session }) {
     })
     pendingFilesRef.current[tempId] = blob
     setReplyingTo(null)
+    buzz(HAPTIC.send)
 
     deliver({
       id: tempId,
@@ -830,6 +889,7 @@ export default function ChatApp({ session }) {
       message_type: 'voice',
       reply_to: replyId,
       media_metadata: { duration },
+      media_url: null,
       uploadPath: null,
     })
   }
@@ -872,7 +932,8 @@ export default function ChatApp({ session }) {
     if (!error) {
       setMessages((prev) => prev.filter((m) => m.id !== msgId))
       // Best-effort: also remove the backing file (photo/voice)
-      if (msg?.media_url) {
+      // GIFs hotlink the Giphy CDN — no storage file to remove
+      if (msg?.media_url && !msg.media_url.startsWith('http')) {
         const bucket = msg.message_type === 'voice' ? 'chat-audio' : 'chat-photos'
         supabase.storage.from(bucket).remove([msg.media_url]).then(() => {})
       }
@@ -1192,6 +1253,7 @@ export default function ChatApp({ session }) {
                 msg.message_type === 'voice' && (msg.media_url || msg.localPreviewUrl)
               const isPendingMsg = !!msg.pending
               const isFailedMsg = !!msg.failed
+              const isSticker = msg.message_type === 'text' && !!msg.media_metadata?.sticker
               const showDate = idx === 0 ||
                 getDateLabel(msg.created_at) !== getDateLabel(messages[idx - 1].created_at)
               const myReaction = msg.reactions?.[user.id]
@@ -1251,10 +1313,14 @@ export default function ChatApp({ session }) {
                           onTouchMove={handleBubbleTouchMove}
                           onTouchEnd={handleBubbleTouchEnd}
                           onContextMenu={(e) => { e.preventDefault(); copyMessage(msg) }}
-                          className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-snug shadow-md backdrop-blur-md cursor-pointer select-none ${
-                            isOutgoing
-                              ? 'bg-[#007aff] text-white rounded-br-xs'
-                              : 'bg-[#262629]/90 text-white rounded-bl-xs border border-white/10'
+                          className={`relative rounded-2xl text-sm leading-snug cursor-pointer select-none ${
+                            isSticker
+                              ? ''
+                              : `px-3.5 py-2.5 shadow-md backdrop-blur-md ${
+                                  isOutgoing
+                                    ? 'bg-[#007aff] text-white rounded-br-xs'
+                                    : 'bg-[#262629]/90 text-white rounded-bl-xs border border-white/10'
+                                }`
                           }`}
                         >
                           {/* Quoted reply */}
@@ -1270,7 +1336,8 @@ export default function ChatApp({ session }) {
                                 {repliedMsg.sender_id === user.id ? 'You' : partnerName || 'Friend'}
                               </p>
                               <p className={`truncate max-w-[250px] ${isOutgoing ? 'text-white/70' : 'text-white/50'}`}>
-                                {repliedMsg.message_type === 'photo' ? '📷 Photo'
+                                {repliedMsg.message_type === 'photo'
+                                  ? (repliedMsg.media_metadata?.gif ? '🎞 GIF' : '📷 Photo')
                                   : repliedMsg.message_type === 'voice' ? '🎤 Voice'
                                   : repliedMsg.content || '...'}
                               </p>
@@ -1371,24 +1438,30 @@ export default function ChatApp({ session }) {
                             </div>
                           ) : (
                             msg.content && (
-                              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                                {linkify(msg.content).map((part, i) =>
-                                  part.type === 'link' ? (
-                                    <a
-                                      key={i}
-                                      href={part.value}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="underline underline-offset-2 text-blue-300 hover:text-blue-200"
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      {part.value}
-                                    </a>
-                                  ) : (
-                                    <span key={i}>{part.value}</span>
-                                  )
-                                )}
-                              </p>
+                              isSticker ? (
+                                <p className="text-6xl leading-none py-1 select-none" aria-label="Sticker">
+                                  {msg.content}
+                                </p>
+                              ) : (
+                                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                                  {linkify(msg.content).map((part, i) =>
+                                    part.type === 'link' ? (
+                                      <a
+                                        key={i}
+                                        href={part.value}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="underline underline-offset-2 text-blue-300 hover:text-blue-200"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        {part.value}
+                                      </a>
+                                    ) : (
+                                      <span key={i}>{part.value}</span>
+                                    )
+                                  )}
+                                </p>
+                              )
                             )
                           )}
 
@@ -1462,7 +1535,8 @@ export default function ChatApp({ session }) {
                 Replying to {replyingTo.sender_id === user.id ? 'yourself' : (partnerName || 'Friend')}
               </p>
               <p className="text-xs text-white/50 truncate">
-                {replyingTo.message_type === 'photo' ? '📷 Photo'
+                {replyingTo.message_type === 'photo'
+                  ? (replyingTo.media_metadata?.gif ? '🎞 GIF' : '📷 Photo')
                   : replyingTo.message_type === 'voice' ? '🎤 Voice'
                   : replyingTo.content || '...'}
               </p>
@@ -1498,6 +1572,8 @@ export default function ChatApp({ session }) {
             onSend={handleSend}
             onTyping={sendTyping}
             onFileSelect={handleFileSelect}
+            onSendGif={handleGifSend}
+            onSendSticker={handleStickerSend}
             onMic={() => {
               if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
                 showToast('Voice messages not supported in this browser')

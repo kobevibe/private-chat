@@ -30,6 +30,8 @@ Live: https://private-chat-swart-pi.vercel.app
 - **Wallpaper picker** — four built-in options
 - **Chat drafts** — input persists locally across reloads
 - **Optimistic send** — messages, photos, and voice appear instantly; uploads happen in the background with a sending spinner, and failed sends show a tap-to-retry button
+- **GIFs & stickers** — smiley button in the composer opens a picker: GIF search via the Giphy API (curated fallback without a key) plus a big-emoji sticker grid; stickers render bubble-less
+- **Haptics** — vibration on send and on receiving a message (Android/Windows; iOS ignores it)
 
 ## Stack
 
@@ -57,6 +59,7 @@ One-time Supabase setup (accounts, migrations, room, realtime, storage bucket) i
 ```
 VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 VITE_SUPABASE_ANON_KEY=YOUR_PUBLISHABLE_KEY
+VITE_GIPHY_API_KEY=YOUR_GIPHY_KEY   # optional — live GIF search (curated set works without it)
 ```
 
 ## Database

@@ -1,9 +1,21 @@
 import { useRef, useState, useEffect } from 'react'
+import GifStickerPicker from './GifStickerPicker'
 
 const MAX_MESSAGE_LENGTH = 2000
 
-export default function Composer({ onSend, onTyping, onFileSelect, onMic, hasAttachment, uploading, recording }) {
+export default function Composer({
+  onSend,
+  onTyping,
+  onFileSelect,
+  onMic,
+  onSendGif,
+  onSendSticker,
+  hasAttachment,
+  uploading,
+  recording,
+}) {
   const [text, setText] = useState(() => localStorage.getItem('our-space-draft') || '')
+  const [showPicker, setShowPicker] = useState(false)
   const textareaRef = useRef(null)
   const fileInputRef = useRef(null)
 
@@ -47,8 +59,21 @@ export default function Composer({ onSend, onTyping, onFileSelect, onMic, hasAtt
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); submit() }}
-      className="flex items-center gap-2"
+      className="relative flex items-center gap-2"
     >
+      {showPicker && (
+        <GifStickerPicker
+          onPickGif={(gif) => {
+            setShowPicker(false)
+            onSendGif(gif)
+          }}
+          onPickSticker={(emoji) => {
+            setShowPicker(false)
+            onSendSticker(emoji)
+          }}
+          onClose={() => setShowPicker(false)}
+        />
+      )}
       <input
         ref={fileInputRef}
         type="file"
@@ -69,6 +94,22 @@ export default function Composer({ onSend, onTyping, onFileSelect, onMic, hasAtt
       >
         <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+        </svg>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setShowPicker((v) => !v)}
+        disabled={uploading || recording}
+        className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors border shrink-0 cursor-pointer disabled:opacity-50 ${
+          showPicker ? 'bg-[#007aff]/25 border-blue-400/50 text-blue-300' : 'bg-white/10 hover:bg-white/20 text-white/80 border-white/10'
+        }`}
+        title="GIFs and stickers"
+        aria-label="GIFs and stickers"
+        aria-expanded={showPicker}
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       </button>
 

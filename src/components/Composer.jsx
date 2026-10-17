@@ -99,7 +99,7 @@ export default function Composer({ onSend, onTyping, onFileSelect, onMic, hasAtt
           rows={1}
           maxLength={MAX_MESSAGE_LENGTH}
           aria-label="Message input"
-          className="w-full bg-[#1c1c1e]/90 border border-white/15 text-white placeholder-white/40 text-sm rounded-2xl pl-4 pr-10 py-2.5 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-inner resize-none leading-snug max-h-[140px] overflow-y-auto chat-scrollbar"
+          className="w-full bg-[#1c1c1e]/90 border border-white/15 text-white placeholder-white/40 text-[16px] rounded-2xl pl-4 pr-10 py-2.5 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-inner resize-none leading-snug max-h-[140px] overflow-y-auto chat-scrollbar"
         />
         <button
           type="submit"

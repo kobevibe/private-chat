@@ -1,7 +1,14 @@
 @import "tailwindcss";
 
 @layer base {
+  html,
   body {
+    height: 100%;
+    /* Page itself must never scroll — only the chat list does.
+       Prevents the viewport from sliding when the keyboard opens/closes. */
+    overflow: hidden;
+    /* Kill double-tap zoom (pinch zoom still works) */
+    touch-action: manipulation;
     background-color: #090d16;
     color: #f3f4f6;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;

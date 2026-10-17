@@ -77,6 +77,7 @@ export default function ChatApp({ session }) {
   const wallpaperRef = useRef(selectedWallpaper)
   const pendingFilesRef = useRef({}) // tempId → File/Blob awaiting upload
   const previewUrlsRef = useRef({}) // tempId → local object URL
+  const forceBottomRef = useRef(false) // next messages change → instant jump to sent message
 
   // Persist wallpaper + crossfade
   const setSelectedWallpaper = (url) => {
@@ -91,7 +92,9 @@ export default function ChatApp({ session }) {
   }
 
   const scrollToBottom = useCallback((behavior = 'smooth') => {
-    messagesEndRef.current?.scrollIntoView({ behavior })
+    const el = mainRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior })
   }, [])
 
   // ---------- Load room + messages ----------
@@ -504,6 +507,11 @@ export default function ChatApp({ session }) {
   useEffect(() => {
     const el = mainRef.current
     if (!el) return
+    if (forceBottomRef.current) {
+      forceBottomRef.current = false
+      el.scrollTo({ top: el.scrollHeight, behavior: 'instant' })
+      return
+    }
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
     if (atBottom) scrollToBottom()
   }, [messages, otherUserTyping, scrollToBottom])
@@ -514,6 +522,7 @@ export default function ChatApp({ session }) {
   const appendOptimistic = ({ content, message_type, media_metadata, reply_to, localPreviewUrl }) => {
     const tempId = `temp-${crypto.randomUUID()}`
     previewUrlsRef.current[tempId] = localPreviewUrl || null
+    forceBottomRef.current = true // focus on the message being sent — no drift
     setMessages((prev) => [
       ...prev,
       {
@@ -1041,7 +1050,13 @@ export default function ChatApp({ session }) {
               <button
                 onClick={() => {
                   const el = document.getElementById(`msg-${pinned.id}`)
-                  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                  const main = mainRef.current
+                  if (el && main) {
+                    main.scrollTo({
+                      top: el.offsetTop - main.clientHeight / 2 + el.offsetHeight / 2,
+                      behavior: 'smooth',
+                    })
+                  }
                 }}
                 className="flex-1 min-w-0 text-left cursor-pointer"
               >

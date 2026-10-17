@@ -436,7 +436,8 @@ export default function ChatApp({ session }) {
         m.message_type === 'photo' &&
         (signedUrls[m.id] || (m.media_url && m.media_url.startsWith('http')))
     )
-    .map((m) => ({ id: m.id, url: signedUrls[m.id] || m.media_url }))
+    // GIF thumbs use the tiny still frame — never animate a whole grid
+    .map((m) => ({ id: m.id, url: signedUrls[m.id] || m.media_metadata?.preview || m.media_url }))
     .reverse()
 
   // ---------- Presence: heartbeat + partner last-seen ----------
@@ -718,7 +719,7 @@ export default function ChatApp({ session }) {
       content: null,
       message_type: 'photo',
       media_url: gif.url,
-      media_metadata: { gif: true },
+      media_metadata: { gif: true, mp4: !!gif.mp4, preview: gif.still || null },
       reply_to: replyId,
     })
     setReplyingTo(null)
@@ -729,7 +730,7 @@ export default function ChatApp({ session }) {
       message_type: 'photo',
       reply_to: replyId,
       media_url: gif.url,
-      media_metadata: { gif: true },
+      media_metadata: { gif: true, mp4: !!gif.mp4, preview: gif.still || null },
       uploadPath: null,
     })
   }
@@ -1352,22 +1353,39 @@ export default function ChatApp({ session }) {
                           {isPhoto && (
                             <div
                               className={`relative mb-1.5 -mx-1 -mt-1 overflow-hidden rounded-xl ${photoUrl ? 'cursor-pointer' : ''}`}
-                              onClick={(e) => { if (!photoUrl) return; e.stopPropagation(); setViewingPhoto(photoUrl) }}
+                              onClick={(e) => {
+                                // MP4 GIFs play in place — nothing to open
+                                if (!photoUrl || (isGif && msg.media_metadata?.mp4)) return
+                                e.stopPropagation()
+                                setViewingPhoto(photoUrl)
+                              }}
                             >
                               {photoUrl ? (
-                                <>
-                                  <img
+                                isGif && msg.media_metadata?.mp4 ? (
+                                  <video
                                     src={photoUrl}
-                                    alt="Attachment"
-                                    decoding="async"
-                                    className={`w-full object-cover ${isGif ? 'max-h-52 max-w-[240px]' : 'max-h-56'} ${isPendingMsg ? 'opacity-70' : isGif ? '' : 'hover:scale-[1.02]'} transition-transform duration-200`}
+                                    poster={msg.media_metadata?.preview || undefined}
+                                    autoPlay
+                                    loop
+                                    muted
+                                    playsInline
+                                    className="w-full max-h-52 max-w-[240px] object-cover"
                                   />
-                                  {isPendingMsg && (
-                                    <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-                                      <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                                    </div>
-                                  )}
-                                </>
+                                ) : (
+                                  <>
+                                    <img
+                                      src={photoUrl}
+                                      alt="Attachment"
+                                      decoding="async"
+                                      className={`w-full object-cover ${isGif ? 'max-h-52 max-w-[240px]' : 'max-h-56'} ${isPendingMsg ? 'opacity-70' : isGif ? '' : 'hover:scale-[1.02]'} transition-transform duration-200`}
+                                    />
+                                    {isPendingMsg && (
+                                      <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                                        <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                      </div>
+                                    )}
+                                  </>
+                                )
                               ) : (
                                 <div className="w-44 h-28 flex items-center justify-center bg-white/10">
                                   <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />

@@ -2,23 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 
 const GIPHY_KEY = import.meta.env.VITE_GIPHY_API_KEY || ''
 
-// Verified working Giphy CDN URLs (fallback when no API key is configured).
-// Sent/displayed via the 200w derivative (~60KB vs ~200-400KB full) to keep the chat fast.
+// Verified working Giphy MP4 URLs (fallback when no API key is configured).
+// MP4s are hardware-decoded — dozens of them scroll smoothly where animated GIFs jank.
 const CURATED_GIFS = [
-  'https://media.giphy.com/media/3o7abldj0b3rxrZUxW/200w.gif',
-  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/200w.gif',
-  'https://media.giphy.com/media/26BRv0ThflsHCqDrG/200w.gif',
-  'https://media.giphy.com/media/IwAZ6dvvveTdpIjNsE/200w.gif',
-  'https://media.giphy.com/media/mdrNUFcG4Dl3Cdd7kK/200w.gif',
-  'https://media.giphy.com/media/5GoVLqeAOo6PK/200w.gif',
-  'https://media.giphy.com/media/111ebonMs90YLu/200w.gif',
-  'https://media.giphy.com/media/8fen5LSZcHQ5O/200w.gif',
-  'https://media.giphy.com/media/ICOgUNjzO0rG4/200w.gif',
-  'https://media.giphy.com/media/3oEjHV0z8S7WM4MwnK/200w.gif',
-  'https://media.giphy.com/media/26BRzozg4TCBXv6g0/200w.gif',
-  'https://media.giphy.com/media/y5bjIuPmAQyrijbH2p/200w.gif',
-  'https://media.giphy.com/media/26ufdipQqU2lhNA4g/200w.gif',
-  'https://media.giphy.com/media/YoZxq8nXYpw2k/200w.gif',
+  'https://media.giphy.com/media/3o7abldj0b3rxrZUxW/200w.mp4',
+  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/200w.mp4',
+  'https://media.giphy.com/media/26BRv0ThflsHCqDrG/200w.mp4',
+  'https://media.giphy.com/media/111ebonMs90YLu/200w.mp4',
+  'https://media.giphy.com/media/8fen5LSZcHQ5O/200w.mp4',
+  'https://media.giphy.com/media/3oEjHV0z8S7WM4MwnK/200w.mp4',
+  'https://media.giphy.com/media/26ufdipQqU2lhNA4g/200w.mp4',
 ]
 
 const STICKERS = [
@@ -38,11 +31,14 @@ function giphySearchUrl(q, limit = 24) {
 }
 
 function mapGiphyGif(g) {
-  // Small preview for the grid (~90px, a few KB); chat gets the 200px-tall variant (~50-150KB),
-  // never the multi-MB original — heavy GIFs were janking the whole page.
+  // MP4 first (hardware-decoded, ~5-10x lighter than GIF); gif url kept as fallback.
+  // still = tiny static frame for gallery thumbnails.
+  const mp4 = g.images?.fixed_height?.mp4 || g.images?.downsized?.mp4 || g.images?.original?.mp4
+  const gif = g.images?.fixed_height?.url || g.images?.downsized?.url || g.images?.original?.url
   return {
-    preview: g.images?.fixed_width_small?.url || g.images?.preview_gif?.url || g.images?.fixed_width?.url,
-    url: g.images?.fixed_height?.url || g.images?.downsized?.url || g.images?.original?.url,
+    url: mp4 || gif,
+    mp4: !!mp4,
+    still: g.images?.fixed_width_small?.url || g.images?.preview_gif?.url || null,
     id: g.id,
   }
 }
@@ -50,7 +46,7 @@ function mapGiphyGif(g) {
 export default function GifStickerPicker({ onPickGif, onPickSticker, onClose }) {
   const [tab, setTab] = useState('gif')
   const [query, setQuery] = useState('')
-  const [gifs, setGifs] = useState(CURATED_GIFS.map((u, i) => ({ preview: u, url: u, id: `c${i}` })))
+  const [gifs, setGifs] = useState(CURATED_GIFS.map((u, i) => ({ url: u, mp4: true, still: null, id: `c${i}` })))
   const [loading, setLoading] = useState(false)
   const rootRef = useRef(null)
   const searchTimerRef = useRef(null)
@@ -131,7 +127,19 @@ export default function GifStickerPicker({ onPickGif, onPickSticker, onClose }) 
                   onClick={() => onPickGif(g)}
                   className="aspect-square overflow-hidden rounded-lg bg-white/5 hover:ring-2 hover:ring-blue-500 transition-all cursor-pointer"
                 >
-                  <img src={g.preview} alt="" loading="lazy" className="w-full h-full object-cover" />
+                  {g.mp4 ? (
+                    <video
+                      src={g.url}
+                      autoPlay
+                      loop
+                      muted
+                      playsInline
+                      preload="metadata"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <img src={g.url} alt="" loading="lazy" className="w-full h-full object-cover" />
+                  )}
                 </button>
               ))}
               {loading && (

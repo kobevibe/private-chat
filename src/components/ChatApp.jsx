@@ -1254,6 +1254,7 @@ export default function ChatApp({ session }) {
               const isPendingMsg = !!msg.pending
               const isFailedMsg = !!msg.failed
               const isSticker = msg.message_type === 'text' && !!msg.media_metadata?.sticker
+              const isGif = msg.message_type === 'photo' && !!msg.media_metadata?.gif
               const showDate = idx === 0 ||
                 getDateLabel(msg.created_at) !== getDateLabel(messages[idx - 1].created_at)
               const myReaction = msg.reactions?.[user.id]
@@ -1268,7 +1269,11 @@ export default function ChatApp({ session }) {
               }
 
               return (
-                <div key={msg.id} id={`msg-${msg.id}`}>
+                <div
+                  key={msg.id}
+                  id={`msg-${msg.id}`}
+                  className="[content-visibility:auto] [contain-intrinsic-size:auto_100px]"
+                >
                   {showDate && <DateSeparator label={getDateLabel(msg.created_at)} />}
 
                   <div
@@ -1354,7 +1359,8 @@ export default function ChatApp({ session }) {
                                   <img
                                     src={photoUrl}
                                     alt="Attachment"
-                                    className={`w-full max-h-56 object-cover transition-transform duration-200 ${isPendingMsg ? 'opacity-70' : 'hover:scale-[1.02]'}`}
+                                    decoding="async"
+                                    className={`w-full object-cover ${isGif ? 'max-h-52 max-w-[240px]' : 'max-h-56'} ${isPendingMsg ? 'opacity-70' : isGif ? '' : 'hover:scale-[1.02]'} transition-transform duration-200`}
                                   />
                                   {isPendingMsg && (
                                     <div className="absolute inset-0 flex items-center justify-center bg-black/30">

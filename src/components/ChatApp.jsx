@@ -1247,11 +1247,7 @@ export default function ChatApp({ session }) {
               }
 
               return (
-                <div
-                  key={msg.id}
-                  id={`msg-${msg.id}`}
-                  className="[content-visibility:auto] [contain-intrinsic-size:auto_100px]"
-                >
+                <div key={msg.id} id={`msg-${msg.id}`}>
                   {showDate && <DateSeparator label={getDateLabel(msg.created_at)} />}
 
                   <div

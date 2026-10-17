@@ -13,6 +13,7 @@ import ImageUploadPreview from './ImageUploadPreview'
 import UnreadBadge from './UnreadBadge'
 import VoiceRecorder from './VoiceRecorder'
 import VoicePlayer from './VoicePlayer'
+import Composer from './Composer'
 import { getDateLabel, formatLastSeen } from '../utils/dates'
 import { linkify } from '../utils/linkify'
 
@@ -28,9 +29,6 @@ export default function ChatApp({ session }) {
   const user = session.user
 
   const [messages, setMessages] = useState([])
-  const [inputText, setInputText] = useState(() =>
-    localStorage.getItem('our-space-draft') || ''
-  )
   const [loadingMessages, setLoadingMessages] = useState(true)
   const [sendError, setSendError] = useState('')
   const [selectedWallpaper, setSelectedWallpaperState] = useState(() =>
@@ -72,11 +70,9 @@ export default function ChatApp({ session }) {
 
   const messagesEndRef = useRef(null)
   const mainRef = useRef(null)
-  const textareaRef = useRef(null)
   const typingTimeoutRef = useRef(null)
   const lastTypingSentRef = useRef(0)
   const typingChannelRef = useRef(null)
-  const fileInputRef = useRef(null)
   const partnerUserIdRef = useRef(null)
   const wallpaperRef = useRef(selectedWallpaper)
   const pendingFilesRef = useRef({}) // tempId → File/Blob awaiting upload
@@ -92,14 +88,6 @@ export default function ChatApp({ session }) {
     if (roomId) {
       supabase.from('rooms').update({ wallpaper_url: url }).eq('id', roomId).then(() => {})
     }
-  }
-
-  // Auto-resize textarea
-  const autoResizeTextarea = () => {
-    const ta = textareaRef.current
-    if (!ta) return
-    ta.style.height = 'auto'
-    ta.style.height = Math.min(ta.scrollHeight, 140) + 'px'
   }
 
   const scrollToBottom = useCallback((behavior = 'smooth') => {
@@ -296,20 +284,46 @@ export default function ChatApp({ session }) {
       const entries = await Promise.all(
         mediaMsgs.map(async (m) => {
           const bucket = m.message_type === 'voice' ? 'chat-audio' : 'chat-photos'
-          const { data } = await supabase.storage
-            .from(bucket)
-            .createSignedUrl(m.media_url, 3600)
-          return [m.id, data?.signedUrl || null]
+          try {
+            const { data } = await supabase.storage
+              .from(bucket)
+              .createSignedUrl(m.media_url, 3600)
+            return [m.id, data?.signedUrl || null]
+          } catch {
+            return [m.id, null]
+          }
         })
       )
-      if (!cancelled) {
-        setSignedUrls((prev) => {
-          const next = { ...prev }
-          for (const [id, url] of entries) {
-            if (url) next[id] = url
-          }
-          return next
-        })
+      if (cancelled) return
+
+      const succeeded = entries.filter(([, url]) => url)
+      // All failed → leave state untouched so the effect doesn't re-run
+      // and hammer the API in a loop. They retry on the next message change.
+      if (!succeeded.length) return
+
+      const ids = succeeded.map(([id]) => id)
+      setSignedUrls((prev) => {
+        const next = { ...prev }
+        for (const [id, url] of succeeded) next[id] = url
+        return next
+      })
+
+      // Signed URL took over → release the local blob from memory
+      if (messages.some((m) => ids.includes(m.id) && m.localPreviewUrl)) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            ids.includes(m.id) && m.localPreviewUrl
+              ? { ...m, localPreviewUrl: null }
+              : m
+          )
+        )
+      }
+      for (const id of ids) {
+        const url = previewUrlsRef.current[id]
+        if (url) {
+          URL.revokeObjectURL(url)
+          delete previewUrlsRef.current[id]
+        }
       }
     }
     loadUrls()
@@ -598,13 +612,11 @@ export default function ChatApp({ session }) {
     settlePending(tempMsg.id, data)
   }
 
-  const handleSend = (e) => {
-    e.preventDefault()
-    const text = inputText.trim()
-    if ((!text && !imageFile) || !roomId) return
+  const handleSend = (text) => {
+    if ((!text && !imageFile) || !roomId) return false
     if (text.length > MAX_MESSAGE_LENGTH) {
       setSendError(`Message is too long (max ${MAX_MESSAGE_LENGTH} characters).`)
-      return
+      return false
     }
 
     setSendError('')
@@ -621,10 +633,7 @@ export default function ChatApp({ session }) {
     })
     if (file) pendingFilesRef.current[tempId] = file
 
-    // Instant UI reset — no waiting for the network
-    setInputText('')
-    localStorage.removeItem('our-space-draft')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    // Instant UI reset — Composer clears its own input on true
     setReplyingTo(null)
     clearImage()
 
@@ -636,6 +645,7 @@ export default function ChatApp({ session }) {
       media_metadata: null,
       uploadPath: null,
     })
+    return true
   }
 
   const retrySend = (msgId) => {
@@ -653,15 +663,6 @@ export default function ChatApp({ session }) {
       media_metadata: m.media_metadata,
       uploadPath: m.uploadPath,
     })
-  }
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend(e)
-    } else {
-      sendTyping()
-    }
   }
 
   const handleSignOut = async () => {
@@ -742,9 +743,9 @@ export default function ChatApp({ session }) {
   }
 
   const clearImage = () => {
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl)
     setImageFile(null)
     setImagePreviewUrl('')
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   // ---------- Voice messages ----------
@@ -1400,78 +1401,22 @@ export default function ChatApp({ session }) {
 
         {/* Composer */}
         <footer className="relative z-20 p-3 bg-black/50 backdrop-blur-2xl border-t border-white/15 shrink-0 pb-safe">
-          <form onSubmit={handleSend} className="flex items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/gif,image/webp"
-              onChange={handleFileSelect}
-              className="hidden"
-              aria-label="Choose image"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadingImage || recording}
-              className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white/80 flex items-center justify-center transition-colors border border-white/10 shrink-0 cursor-pointer disabled:opacity-50"
-              title="Send a photo"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-                  showToast('Voice messages not supported in this browser')
-                  return
-                }
-                if (imageFile) clearImage()
-                setRecording(true)
-              }}
-              disabled={uploadingImage || recording}
-              className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white/80 flex items-center justify-center transition-colors border border-white/10 shrink-0 cursor-pointer disabled:opacity-50"
-              title="Record a voice message"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 11a7 7 0 0014 0M12 18v3" />
-              </svg>
-            </button>
-
-            <div className="flex-1 relative flex items-end">
-              <textarea
-                ref={textareaRef}
-                value={inputText}
-                onChange={(e) => {
-                  setInputText(e.target.value)
-                  localStorage.setItem('our-space-draft', e.target.value)
-                  autoResizeTextarea()
-                }}
-                onKeyDown={handleKeyDown}
-                placeholder="Message"
-                rows={1}
-                maxLength={MAX_MESSAGE_LENGTH}
-                aria-label="Message input"
-                className="w-full bg-[#1c1c1e]/90 border border-white/15 text-white placeholder-white/40 text-sm rounded-2xl pl-4 pr-10 py-2.5 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-inner resize-none leading-snug max-h-[140px] overflow-y-auto chat-scrollbar"
-              />
-              <button
-                type="submit"
-                disabled={!inputText.trim()}
-                aria-label="Send"
-                className={`absolute right-1.5 bottom-1.5 w-7 h-7 rounded-full flex items-center justify-center transition-all ${
-                  inputText.trim()
-                    ? 'bg-[#007aff] text-white shadow-md hover:bg-blue-600 cursor-pointer scale-100'
-                    : 'bg-white/10 text-white/30 cursor-not-allowed scale-95'
-                }`}
-              >
-                <svg className="w-3.5 h-3.5 rotate-90" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" />
-                </svg>
-              </button>
-            </div>
-          </form>
+          <Composer
+            onSend={handleSend}
+            onTyping={sendTyping}
+            onFileSelect={handleFileSelect}
+            onMic={() => {
+              if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+                showToast('Voice messages not supported in this browser')
+                return
+              }
+              if (imageFile) clearImage()
+              setRecording(true)
+            }}
+            hasAttachment={!!imageFile}
+            uploading={uploadingImage}
+            recording={recording}
+          />
         </footer>
       </div>
 

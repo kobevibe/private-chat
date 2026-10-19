@@ -80,6 +80,7 @@ export default function ChatApp({ session }) {
   const pendingFilesRef = useRef({}) // tempId → File/Blob awaiting upload
   const previewUrlsRef = useRef({}) // tempId → local object URL
   const forceBottomRef = useRef(false) // next messages change → instant jump to sent message
+  const wasDownRef = useRef(false) // realtime outage seen → sync when it recovers
   const [pullDist, setPullDist] = useState(0) // header pull-to-reload distance
   const pullRef = useRef({ startY: 0, active: false, engaged: false })
   const suppressClickUntilRef = useRef(0) // swallows taps that were actually drags
@@ -226,6 +227,39 @@ export default function ChatApp({ session }) {
     return () => { cancelled = true }
   }, [user.id, scrollToBottom])
 
+  // ---------- Self-healing sync ----------
+  // Realtime can silently die (sleeping tabs, network blips). Refetch the full
+  // room whenever the tab comes back, the connection returns, or the channel
+  // recovers — so a dropped channel never requires a manual reload again.
+  const syncMessages = useCallback(async () => {
+    if (!roomId) return
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('room_id', roomId)
+      .order('created_at', { ascending: true })
+    if (error || !data) return
+    setMessages((prev) => {
+      const serverIds = new Set(data.map((m) => m.id))
+      const cutoff = Date.now() - 30000
+      const merged = data.map((m) => {
+        const local = prev.find((p) => p.id === m.id)
+        // Server wins on content; keep the local blob URL while it's still uploading
+        return local
+          ? { ...m, localPreviewUrl: local.localPreviewUrl ?? null }
+          : m
+      })
+      // Keep: in-flight/failed sends (not on server yet) and very recent
+      // settled messages (replica lag). Drop: older settled messages the
+      // server no longer has → deleted remotely.
+      const keepLocal = prev.filter((p) => {
+        if (serverIds.has(p.id)) return false
+        if (p.pending || p.failed) return true
+        return Date.parse(p.created_at) > cutoff
+      })
+      return [...merged, ...keepLocal]
+    })
+  }, [roomId])
   // ---------- Realtime subscription ----------
   useEffect(() => {
     if (!roomId) return
@@ -300,19 +334,34 @@ export default function ChatApp({ session }) {
       )
       .subscribe((status) => {
         setChannelStatus(status)
+        // Channel recovered after an outage → pull anything we missed
+        if (status === 'SUBSCRIBED' && wasDownRef.current) {
+          wasDownRef.current = false
+          syncMessages()
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          wasDownRef.current = true
+        }
       })
 
-    const handleOnline = () => setChannelStatus('SUBSCRIBED')
+    const handleOnline = () => {
+      setChannelStatus('SUBSCRIBED')
+      syncMessages()
+    }
     const handleOffline = () => setChannelStatus('CHANNEL_ERROR')
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') syncMessages()
+    }
     window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
+    document.addEventListener('visibilitychange', handleVisibility)
 
     return () => {
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
+      document.removeEventListener('visibilitychange', handleVisibility)
       supabase.removeChannel(channel)
     }
-  }, [roomId, user.id])
+  }, [roomId, user.id, syncMessages])
 
   const isReconnecting =
     channelStatus === 'CHANNEL_ERROR' || channelStatus === 'TIMED_OUT' || channelStatus === 'CLOSED'
@@ -561,11 +610,36 @@ export default function ChatApp({ session }) {
     if (forceBottomRef.current) {
       forceBottomRef.current = false
       el.scrollTo({ top: el.scrollHeight, behavior: 'instant' })
+      setShowScrollBtn(false)
       return
     }
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    // Keep the jump-to-bottom button in sync on every content change —
+    // layout growth does NOT fire scroll events, so without this the button
+    // stays hidden when a message arrives while reading history.
+    setShowScrollBtn(!atBottom)
     if (atBottom) scrollToBottom()
   }, [messages, otherUserTyping, scrollToBottom])
+
+  // Pause GIF videos that scroll out of view — saves CPU/GPU on long histories
+  useEffect(() => {
+    const root = mainRef.current
+    if (!root) return undefined
+    const videos = Array.from(root.querySelectorAll('video'))
+    if (!videos.length || typeof IntersectionObserver === 'undefined') return undefined
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const v = entry.target
+          if (entry.isIntersecting) v.play().catch(() => {})
+          else v.pause()
+        }
+      },
+      { root, rootMargin: '50px 0px' }
+    )
+    videos.forEach((v) => io.observe(v))
+    return () => io.disconnect()
+  }, [messages])
 
   // ---------- Send message (optimistic — bubble appears instantly) ----------
   const isTempId = (id) => typeof id === 'string' && id.startsWith('temp-')
@@ -1295,7 +1369,7 @@ export default function ChatApp({ session }) {
                           className={`relative rounded-2xl text-sm leading-snug cursor-pointer select-none ${
                             isSticker
                               ? ''
-                              : `px-3.5 py-2.5 shadow-md backdrop-blur-md ${
+                              : `px-3.5 py-2.5 shadow-md ${
                                   isOutgoing
                                     ? 'bg-[#007aff] text-white rounded-br-xs'
                                     : 'bg-[#262629]/90 text-white rounded-bl-xs border border-white/10'
@@ -1325,7 +1399,7 @@ export default function ChatApp({ session }) {
 
                           {isPhoto && (
                             <div
-                              className={`relative mb-1.5 -mx-1 -mt-1 overflow-hidden rounded-xl ${photoUrl ? 'cursor-pointer' : ''}`}
+                              className={`relative mb-1.5 -mx-1 -mt-1 overflow-hidden rounded-xl w-60 max-w-full aspect-[4/3] bg-white/5 ${photoUrl ? 'cursor-pointer' : ''}`}
                               onClick={(e) => {
                                 // MP4 GIFs play in place — nothing to open
                                 if (!photoUrl || (isGif && msg.media_metadata?.mp4)) return
@@ -1337,12 +1411,13 @@ export default function ChatApp({ session }) {
                                 isGif && msg.media_metadata?.mp4 ? (
                                   <video
                                     src={photoUrl}
+                                    data-gif-video
                                     poster={msg.media_metadata?.preview || undefined}
                                     autoPlay
                                     loop
                                     muted
                                     playsInline
-                                    className="w-full max-h-52 max-w-[240px] object-cover"
+                                    className="absolute inset-0 w-full h-full object-cover"
                                   />
                                 ) : (
                                   <>
@@ -1350,7 +1425,7 @@ export default function ChatApp({ session }) {
                                       src={photoUrl}
                                       alt="Attachment"
                                       decoding="async"
-                                      className={`w-full object-cover ${isGif ? 'max-h-52 max-w-[240px]' : 'max-h-56'} ${isPendingMsg ? 'opacity-70' : isGif ? '' : 'hover:scale-[1.02]'} transition-transform duration-200`}
+                                      className={`absolute inset-0 w-full h-full object-cover ${isPendingMsg ? 'opacity-70' : isGif ? '' : 'hover:scale-[1.02]'} transition-transform duration-200`}
                                     />
                                     {isPendingMsg && (
                                       <div className="absolute inset-0 flex items-center justify-center bg-black/30">
@@ -1360,7 +1435,7 @@ export default function ChatApp({ session }) {
                                   </>
                                 )
                               ) : (
-                                <div className="w-44 h-28 flex items-center justify-center bg-white/10">
+                                <div className="absolute inset-0 flex items-center justify-center">
                                   <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
                                 </div>
                               )}

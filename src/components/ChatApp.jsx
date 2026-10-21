@@ -1072,6 +1072,69 @@ export default function ChatApp({ session }) {
     }
   }
 
+  // ---------- Delete every message older than N days ----------
+  const deleteOldMessages = async (days = 7) => {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+    const PAGE = 1000
+
+    // Collect first (paginated) — deleting while paging would skip rows
+    const rows = []
+    try {
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('messages')
+          .select('id, media_url, message_type')
+          .lt('created_at', cutoff)
+          .order('created_at', { ascending: true })
+          .range(from, from + PAGE - 1)
+        if (error) return { removed: 0, files: 0, error: error.message }
+        rows.push(...(data || []))
+        if (!data || data.length < PAGE) break
+      }
+    } catch (e) {
+      return { removed: 0, files: 0, error: e?.message || 'Could not load old messages' }
+    }
+
+    if (!rows.length) return { removed: 0, files: 0, error: null }
+
+    // Remove their media first so a failed row-delete can't strand the files
+    let files = 0
+    const byBucket = { 'chat-photos': [], 'chat-audio': [] }
+    for (const row of rows) {
+      if (!row.media_url || row.media_url.startsWith('http')) continue
+      const bucket = row.message_type === 'voice' ? 'chat-audio' : 'chat-photos'
+      byBucket[bucket].push(row.media_url)
+    }
+    for (const [bucket, paths] of Object.entries(byBucket)) {
+      for (let i = 0; i < paths.length; i += 100) {
+        const chunk = paths.slice(i, i + 100)
+        const { error } = await supabase.storage.from(bucket).remove(chunk)
+        if (!error) files += chunk.length
+      }
+    }
+
+    let removed = 0
+    const ids = rows.map((r) => r.id)
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100)
+      const { error } = await supabase.from('messages').delete().in('id', chunk)
+      if (error) return { removed, files, error: error.message }
+      removed += chunk.length
+    }
+
+    setMessages((prev) => prev.filter((m) => !m.created_at || m.created_at >= cutoff))
+    return { removed, files, error: null }
+  }
+
+  const countOldMessages = async (days = 7) => {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+    const { count, error } = await supabase
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .lt('created_at', cutoff)
+    return error ? -1 : count ?? 0
+  }
+
   // ---------- Pin / unpin ----------
   const togglePin = async (msgId) => {
     if (!roomId) return
@@ -1760,6 +1823,8 @@ export default function ChatApp({ session }) {
         onOpenPhoto={(url) => { setShowGallery(false); setViewingPhoto(url) }}
         onDelete={(id) => deleteMessage(id)}
         onCleanup={cleanupOrphans}
+        onDeleteOld={deleteOldMessages}
+        onCountOld={countOldMessages}
         onClose={showGallery ? () => setShowGallery(false) : null}
       />
 

@@ -12,13 +12,14 @@ function formatWhen(iso) {
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${time}`
 }
 
-export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, onCleanup, onClose }) {
+export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, onCleanup, onDeleteOld, onCountOld, onClose }) {
   const [tab, setTab] = useState('photos')
   const [confirmId, setConfirmId] = useState(null)
   const [busyId, setBusyId] = useState(null)
-  const [confirmCleanup, setConfirmCleanup] = useState(false)
-  const [cleaning, setCleaning] = useState(false)
-  const [cleanupNote, setCleanupNote] = useState('')
+  const [pendingAction, setPendingAction] = useState(null) // 'orphans' | 'old'
+  const [oldCount, setOldCount] = useState(null)
+  const [working, setWorking] = useState(null)
+  const [note, setNote] = useState('')
 
   if (!onClose) return null
 
@@ -29,16 +30,64 @@ export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, on
     setConfirmId(null)
   }
 
-  const runCleanup = async () => {
-    if (!onCleanup) return
-    setConfirmCleanup(false)
-    setCleaning(true)
-    setCleanupNote('')
-    const result = await onCleanup()
-    setCleaning(false)
-    if (result?.error) setCleanupNote(`Cleanup failed: ${result.error}`)
-    else if (result?.removed) setCleanupNote(`Removed ${result.removed} unused file${result.removed === 1 ? '' : 's'}`)
-    else setCleanupNote('Nothing to clean — every file belongs to a message')
+  const openAction = (action) => {
+    setPendingAction(action)
+    setNote('')
+    if (action === 'old') {
+      setOldCount(null)
+      if (onCountOld) {
+        onCountOld()
+          .then((c) => setOldCount(typeof c === 'number' && c >= 0 ? c : -1))
+          .catch(() => setOldCount(-1))
+      }
+    }
+  }
+
+  const runAction = async (action) => {
+    const run = action === 'orphans' ? onCleanup : onDeleteOld
+    if (!run) return
+    setPendingAction(null)
+    setWorking(action)
+    setNote('')
+    const result = await run()
+    setWorking(null)
+    if (!result) return
+
+    if (result.error) {
+      setNote(`${action === 'orphans' ? 'Cleanup' : 'Delete'} failed: ${result.error}`)
+      return
+    }
+    if (action === 'orphans') {
+      setNote(
+        result.removed
+          ? `Removed ${result.removed} unused file${result.removed === 1 ? '' : 's'}`
+          : 'Nothing to clean — every file belongs to a message'
+      )
+      return
+    }
+    const n = result.removed || 0
+    if (!n) {
+      setNote('No messages older than 7 days')
+      return
+    }
+    setNote(
+      `Deleted ${n} message${n === 1 ? '' : 's'}${
+        result.files ? ` and ${result.files} file${result.files === 1 ? '' : 's'}` : ''
+      } older than 7 days`
+    )
+  }
+
+  const ACTIONS = {
+    orphans: {
+      title: 'Delete files that no message points to?',
+      hint: 'Only unused uploads are removed.',
+      label: 'Clean',
+    },
+    old: {
+      title: 'Delete every message older than 7 days?',
+      hint: 'Text, photos and voice notes are removed permanently.',
+      label: 'Delete',
+    },
   }
 
   const renderConfirm = (id, label) => (
@@ -75,15 +124,35 @@ export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, on
       >
         <h2 className="text-sm font-semibold text-white">Shared media</h2>
         <div className="flex items-center gap-1">
+          {onDeleteOld && (
+            <button
+              onClick={() => openAction('old')}
+              disabled={!!working}
+              aria-label="Delete messages older than 7 days"
+              title="Delete messages older than 7 days"
+              className="text-white/60 hover:text-white p-1.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {working === 'old' ? (
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+            </button>
+          )}
           {onCleanup && (
             <button
-              onClick={() => { setConfirmCleanup(true); setCleanupNote('') }}
-              disabled={cleaning}
+              onClick={() => openAction('orphans')}
+              disabled={!!working}
               aria-label="Remove unused files"
               title="Remove unused files"
               className="text-white/60 hover:text-white p-1.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50"
             >
-              {cleaning ? (
+              {working === 'orphans' ? (
                 <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
@@ -107,23 +176,35 @@ export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, on
         </div>
       </div>
 
-      {confirmCleanup && (
+      {pendingAction && (
         <div
-          className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 shrink-0"
+          className="flex items-start justify-between gap-3 px-4 py-2 border-b border-white/10 shrink-0"
           onClick={(e) => e.stopPropagation()}
         >
-          <span className="text-[11px] text-white/70">
-            Delete files that no message points to?
-          </span>
+          <div className="min-w-0">
+            <p className="text-[11px] text-white/80">{ACTIONS[pendingAction].title}</p>
+            <p className="text-[10px] text-white/45 mt-0.5">
+              {pendingAction === 'old'
+                ? oldCount === null
+                  ? 'Checking how many messages…'
+                  : oldCount === -1
+                    ? 'This permanently deletes the old messages and their media.'
+                    : oldCount === 0
+                      ? 'No messages are older than 7 days.'
+                      : `${oldCount} message${oldCount === 1 ? '' : 's'} and their media will be permanently deleted.`
+                : ACTIONS[pendingAction].hint}
+            </p>
+          </div>
           <div className="flex gap-1.5 shrink-0">
             <button
-              onClick={runCleanup}
-              className="px-2.5 py-1 rounded-md bg-red-500 hover:bg-red-400 text-white text-[11px] font-medium transition-colors cursor-pointer"
+              onClick={() => runAction(pendingAction)}
+              disabled={pendingAction === 'old' && (oldCount === null || oldCount === 0)}
+              className="px-2.5 py-1 rounded-md bg-red-500 hover:bg-red-400 text-white text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              Delete
+              {ACTIONS[pendingAction].label}
             </button>
             <button
-              onClick={() => setConfirmCleanup(false)}
+              onClick={() => setPendingAction(null)}
               className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/15 text-white text-[11px] transition-colors cursor-pointer"
             >
               Cancel
@@ -132,9 +213,9 @@ export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, on
         </div>
       )}
 
-      {cleanupNote && (
+      {note && (
         <div className="px-4 py-2 border-b border-white/10 shrink-0 text-[11px] text-white/60" onClick={(e) => e.stopPropagation()}>
-          {cleanupNote}
+          {note}
         </div>
       )}
 

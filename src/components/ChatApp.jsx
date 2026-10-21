@@ -6,8 +6,9 @@ import ScrollToBottom from './ScrollToBottom'
 import WallpaperPicker from './WallpaperPicker'
 import ProfileEdit from './ProfileEdit'
 import PhotoViewer from './PhotoViewer'
-import PhotoGallery from './PhotoGallery'
+import MediaGallery from './MediaGallery'
 import { buzz, HAPTIC } from '../lib/haptics'
+import { compressImage } from '../lib/compressImage'
 import ReactionPicker from './ReactionPicker'
 import DateSeparator from './DateSeparator'
 import ImageUploadPreview from './ImageUploadPreview'
@@ -489,6 +490,17 @@ export default function ChatApp({ session }) {
     .map((m) => ({ id: m.id, url: signedUrls[m.id] || m.media_metadata?.preview || m.media_url }))
     .reverse()
 
+  const galleryVoices = messages
+    .filter((m) => m.message_type === 'voice' && signedUrls[m.id])
+    .map((m) => ({
+      id: m.id,
+      url: signedUrls[m.id],
+      duration: m.media_metadata?.duration,
+      senderName: m.sender_id === user.id ? 'You' : partnerName || 'Friend',
+      createdAt: m.created_at,
+    }))
+    .reverse()
+
   // ---------- Presence: heartbeat + partner last-seen ----------
   useEffect(() => {
     let cancelled = false
@@ -703,7 +715,7 @@ export default function ChatApp({ session }) {
     const bucket = isVoice ? 'chat-audio' : 'chat-photos'
     const opts = isVoice ? { contentType: file.type || 'audio/webm' } : undefined
     const { error } = await supabase.storage.from(bucket).upload(path, file, opts)
-    return error ? null : path
+    return error ? { path: null, error: error.message } : { path, error: null }
   }
 
   const deliver = async (tempMsg) => {
@@ -712,13 +724,19 @@ export default function ChatApp({ session }) {
 
     if (!path && file) {
       setUploadingImage(true)
-      path = await uploadMedia(tempMsg.message_type, file)
+      // Resize + re-encode phone photos (3–10 MB → ~150–400 KB) so uploads
+      // never hit bucket limits or fill the storage quota.
+      const prepared = await compressImage(file)
+      const uploaded = await uploadMedia(tempMsg.message_type, prepared)
       setUploadingImage(false)
-      if (!path) {
+      if (!uploaded.path) {
         failPending(tempMsg.id)
-        setSendError('Upload failed — tap “Retry” on the message.')
+        setSendError(
+          `Upload failed${uploaded.error ? `: ${uploaded.error}` : ''} — tap “Retry”.`
+        )
         return
       }
+      path = uploaded.path
       delete pendingFilesRef.current[tempMsg.id]
       setMessages((prev) => prev.map((m) => (m.id === tempMsg.id ? { ...m, uploadPath: path } : m)))
     }
@@ -739,7 +757,9 @@ export default function ChatApp({ session }) {
 
     if (error) {
       failPending(tempMsg.id)
-      setSendError('Message failed to send — tap “Retry”.')
+      setSendError(
+        `Message failed to send${error.message ? `: ${error.message}` : ''} — tap “Retry”.`
+      )
       return
     }
 
@@ -1201,7 +1221,7 @@ export default function ChatApp({ session }) {
             </button>
             <button
               onClick={() => setShowGallery(true)}
-              title="Shared photos"
+              title="Shared photos & voice"
               className="p-2 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white/90 transition-all border border-white/10 cursor-pointer"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -1678,9 +1698,10 @@ export default function ChatApp({ session }) {
 
       <PhotoViewer url={viewingPhoto} onClose={() => setViewingPhoto(null)} />
 
-      <PhotoGallery
+      <MediaGallery
         photos={galleryPhotos}
-        onOpen={(url) => { setShowGallery(false); setViewingPhoto(url) }}
+        voices={galleryVoices}
+        onOpenPhoto={(url) => { setShowGallery(false); setViewingPhoto(url) }}
         onDelete={(id) => deleteMessage(id)}
         onClose={showGallery ? () => setShowGallery(false) : null}
       />

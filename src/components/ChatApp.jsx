@@ -20,6 +20,10 @@ import { getDateLabel, formatLastSeen } from '../utils/dates'
 import { linkify } from '../utils/linkify'
 
 const MAX_MESSAGE_LENGTH = 2000
+// PostgREST caps responses at 1000 rows. Always fetch the NEWEST messages
+// (descending) and flip them, otherwise the oldest 1000 fill the page and
+// everything sent after that silently disappears on the next sync.
+const MESSAGE_PAGE_SIZE = 1000
 const PULL_THRESHOLD = 72 // px of pull to trigger reload
 const TYPING_TIMEOUT = 3000
 const DEFAULT_AVATAR =
@@ -210,15 +214,16 @@ export default function ChatApp({ session }) {
         }
       }
 
-      // Load messages
+      // Load the newest messages, then flip to chronological order
       const { data: msgs, error: msgErr } = await supabase
         .from('messages')
         .select('*')
         .eq('room_id', rid)
-        .order('created_at', { ascending: true })
+        .order('created_at', { ascending: false })
+        .limit(MESSAGE_PAGE_SIZE)
 
       if (!cancelled && !msgErr && msgs) {
-        setMessages(msgs)
+        setMessages(msgs.slice().reverse())
         setTimeout(() => scrollToBottom('auto'), 50)
       }
       if (!cancelled) setLoadingMessages(false)
@@ -238,12 +243,14 @@ export default function ChatApp({ session }) {
       .from('messages')
       .select('*')
       .eq('room_id', roomId)
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false })
+      .limit(MESSAGE_PAGE_SIZE)
     if (error || !data) return
+    const latest = data.slice().reverse()
     setMessages((prev) => {
-      const serverIds = new Set(data.map((m) => m.id))
+      const serverIds = new Set(latest.map((m) => m.id))
       const cutoff = Date.now() - 30000
-      const merged = data.map((m) => {
+      const merged = latest.map((m) => {
         const local = prev.find((p) => p.id === m.id)
         // Server wins on content; keep the local blob URL while it's still uploading
         return local

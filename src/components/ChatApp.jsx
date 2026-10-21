@@ -248,24 +248,21 @@ export default function ChatApp({ session }) {
     if (error || !data) return
     const latest = data.slice().reverse()
     setMessages((prev) => {
-      const serverIds = new Set(latest.map((m) => m.id))
-      const cutoff = Date.now() - 30000
-      const merged = latest.map((m) => {
-        const local = prev.find((p) => p.id === m.id)
+      // Merge, never drop: a message that's already on screen must not vanish
+      // just because it fell outside the newest-1000 window. Remote deletes
+      // still arrive through the realtime DELETE event.
+      const byId = new Map(prev.map((m) => [m.id, m]))
+      for (const m of latest) {
+        const local = byId.get(m.id)
         // Server wins on content; keep the local blob URL while it's still uploading
-        return local
-          ? { ...m, localPreviewUrl: local.localPreviewUrl ?? null }
-          : m
-      })
-      // Keep: in-flight/failed sends (not on server yet) and very recent
-      // settled messages (replica lag). Drop: older settled messages the
-      // server no longer has → deleted remotely.
-      const keepLocal = prev.filter((p) => {
-        if (serverIds.has(p.id)) return false
-        if (p.pending || p.failed) return true
-        return Date.parse(p.created_at) > cutoff
-      })
-      return [...merged, ...keepLocal]
+        byId.set(
+          m.id,
+          local ? { ...m, localPreviewUrl: local.localPreviewUrl ?? null } : m
+        )
+      }
+      return [...byId.values()].sort((a, b) =>
+        a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0
+      )
     })
   }, [roomId])
   // ---------- Realtime subscription ----------
@@ -1023,6 +1020,58 @@ export default function ChatApp({ session }) {
     setConfirmDeleteId(null)
   }
 
+  // ---------- Storage cleanup: files no message points to ----------
+  const cleanupOrphans = async () => {
+    const PAGE = 1000
+    const errors = []
+    try {
+      // 1) Every path referenced by a message (paginated — the REST API caps
+      //    responses at 1000 rows, and a cap here would mark live files as orphans)
+      const referenced = new Set()
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('messages')
+          .select('media_url')
+          .not('media_url', 'is', null)
+          .order('created_at', { ascending: true })
+          .range(from, from + PAGE - 1)
+        if (error) return { error: error.message }
+        for (const row of data || []) {
+          if (row.media_url && !row.media_url.startsWith('http')) referenced.add(row.media_url)
+        }
+        if (!data || data.length < PAGE) break
+      }
+
+      // 2) Collect bucket contents first, then delete — deleting while paging
+      //    would shift the offsets and skip files
+      let removed = 0
+      for (const bucket of ['chat-photos', 'chat-audio']) {
+        const files = []
+        for (let offset = 0; ; offset += PAGE) {
+          const { data, error } = await supabase.storage
+            .from(bucket)
+            .list('', { limit: PAGE, offset })
+          if (error) { errors.push(`${bucket}: ${error.message}`); break }
+          if (!data || !data.length) break
+          files.push(...data.filter((f) => f.id))
+          if (data.length < PAGE) break
+        }
+
+        const orphans = files.filter((f) => !referenced.has(f.name)).map((f) => f.name)
+        for (let i = 0; i < orphans.length; i += 100) {
+          const chunk = orphans.slice(i, i + 100)
+          const { error } = await supabase.storage.from(bucket).remove(chunk)
+          if (error) errors.push(`${bucket}: ${error.message}`)
+          else removed += chunk.length
+        }
+      }
+
+      return { removed, error: errors.length ? errors[0] : null }
+    } catch (e) {
+      return { removed: 0, error: e?.message || 'Cleanup failed' }
+    }
+  }
+
   // ---------- Pin / unpin ----------
   const togglePin = async (msgId) => {
     if (!roomId) return
@@ -1710,6 +1759,7 @@ export default function ChatApp({ session }) {
         voices={galleryVoices}
         onOpenPhoto={(url) => { setShowGallery(false); setViewingPhoto(url) }}
         onDelete={(id) => deleteMessage(id)}
+        onCleanup={cleanupOrphans}
         onClose={showGallery ? () => setShowGallery(false) : null}
       />
 

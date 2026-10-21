@@ -12,10 +12,13 @@ function formatWhen(iso) {
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${time}`
 }
 
-export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, onClose }) {
+export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, onCleanup, onClose }) {
   const [tab, setTab] = useState('photos')
   const [confirmId, setConfirmId] = useState(null)
   const [busyId, setBusyId] = useState(null)
+  const [confirmCleanup, setConfirmCleanup] = useState(false)
+  const [cleaning, setCleaning] = useState(false)
+  const [cleanupNote, setCleanupNote] = useState('')
 
   if (!onClose) return null
 
@@ -24,6 +27,18 @@ export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, on
     await onDelete(id)
     setBusyId(null)
     setConfirmId(null)
+  }
+
+  const runCleanup = async () => {
+    if (!onCleanup) return
+    setConfirmCleanup(false)
+    setCleaning(true)
+    setCleanupNote('')
+    const result = await onCleanup()
+    setCleaning(false)
+    if (result?.error) setCleanupNote(`Cleanup failed: ${result.error}`)
+    else if (result?.removed) setCleanupNote(`Removed ${result.removed} unused file${result.removed === 1 ? '' : 's'}`)
+    else setCleanupNote('Nothing to clean — every file belongs to a message')
   }
 
   const renderConfirm = (id, label) => (
@@ -59,16 +74,69 @@ export default function MediaGallery({ photos, voices, onOpenPhoto, onDelete, on
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-sm font-semibold text-white">Shared media</h2>
-        <button
-          onClick={onClose}
-          aria-label="Close media gallery"
-          className="text-white/60 hover:text-white p-1.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-1">
+          {onCleanup && (
+            <button
+              onClick={() => { setConfirmCleanup(true); setCleanupNote('') }}
+              disabled={cleaning}
+              aria-label="Remove unused files"
+              title="Remove unused files"
+              className="text-white/60 hover:text-white p-1.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {cleaning ? (
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3M4 7h16" />
+                </svg>
+              )}
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            aria-label="Close media gallery"
+            className="text-white/60 hover:text-white p-1.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       </div>
+
+      {confirmCleanup && (
+        <div
+          className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 shrink-0"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span className="text-[11px] text-white/70">
+            Delete files that no message points to?
+          </span>
+          <div className="flex gap-1.5 shrink-0">
+            <button
+              onClick={runCleanup}
+              className="px-2.5 py-1 rounded-md bg-red-500 hover:bg-red-400 text-white text-[11px] font-medium transition-colors cursor-pointer"
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => setConfirmCleanup(false)}
+              className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/15 text-white text-[11px] transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {cleanupNote && (
+        <div className="px-4 py-2 border-b border-white/10 shrink-0 text-[11px] text-white/60" onClick={(e) => e.stopPropagation()}>
+          {cleanupNote}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-2 px-4 py-2 border-b border-white/10 shrink-0" onClick={(e) => e.stopPropagation()}>
